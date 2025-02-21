@@ -1,12 +1,4 @@
-#include <Arduino.h>
-#include <ArduinoBLE.h>
-#include <HardwareSerial.h>
-#include "mavlink_headers/common/mavlink.h"
-
-// Define RGB pins
-const int RED_PIN = 11;
-const int GREEN_PIN = 12;
-const int BLUE_PIN = 13;
+#include <main.h>
 
 // Define the input serial port (e.g., UART connected to MAVLink source)
 HardwareSerial &inputSerial = Serial1;
@@ -109,23 +101,7 @@ void processMessage(mavlink_message_t *msg)
 
 void loop()
 {
-  // I want to add a blinking of the LED here -- e.g. a non blocking approach
-  // Blink the LED every 500ms
-  static unsigned long lastBlinkTime = 0;
-  if (millis() - lastBlinkTime >= 250)
-  {
-    lastBlinkTime = millis();
-    static bool ledState = false;
-    ledState = !ledState;
-    if (ledState)
-    {
-      analogWrite(RED_PIN, 255);
-    }
-    else
-    {
-      analogWrite(RED_PIN, 0);
-    }
-  }
+  heartBeatLED();
 
   // Read available data from the input serial port
   if (inputSerial.available() > 0)

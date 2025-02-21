@@ -13,3 +13,5 @@
 #define HEARTBEAT_LED RED_PIN
 
 void heartBeatLED();
+void blueToothSetup();
+void blueToothLoop();

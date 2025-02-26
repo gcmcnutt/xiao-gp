@@ -1,1 +1,3 @@
 - generate headers in include/mavlink_headers
+- a simple arduino logger class to wrap diagnostic outputs
+- during init, need to capture systemid and componentid from heatbeat to use for messages sent.

@@ -61,7 +61,7 @@ void blueToothLoop()
         }
         else
         {
-          Serial.println(F("LED off"));
+          Serial.println("LED off");
           analogWrite(BLUE_PIN, 255);
         }
       }

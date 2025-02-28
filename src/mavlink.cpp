@@ -3,6 +3,8 @@
 // Define the input serial port (e.g., UART connected to MAVLink source)
 HardwareSerial &inputSerial = Serial1;
 
+bool autoc_enabled = false;
+
 void request_telemetry()
 {
   // mavlink_message_t msg;
@@ -94,7 +96,7 @@ void processMessage(mavlink_message_t *msg)
     break;
   }
 
-  // TODO this starts showing up in inav 8.0
+  // this starts showing up in inav 8.0
   case MAVLINK_MSG_ID_RC_CHANNELS:
   {
     mavlink_rc_channels_t rc_channels;
@@ -106,7 +108,30 @@ void processMessage(mavlink_message_t *msg)
     Serial.print(", Ch3: ");
     Serial.print(rc_channels.chan3_raw);
     Serial.print(", Ch4: ");
-    Serial.println(rc_channels.chan4_raw);
+    Serial.print(rc_channels.chan4_raw);
+    Serial.print(", Ch9: ");
+    Serial.print(rc_channels.chan9_raw);
+    Serial.print(", Ch10: ");
+    Serial.print(rc_channels.chan10_raw);
+    Serial.print(", Ch11: ");
+    Serial.print(rc_channels.chan11_raw);
+    Serial.print(", Ch12: ");
+    Serial.println(rc_channels.chan12_raw);
+
+    // edge detection for autoc enable/disable
+    if (rc_channels.chan9_raw > 1500 && autoc_enabled == false)
+    {
+      autoc_enabled = true;
+      Serial.println("Autoc enabled");
+      analogWrite(GREEN_PIN, 0);
+    }
+    else if (rc_channels.chan9_raw <= 1500 && autoc_enabled == true)
+    {
+      autoc_enabled = false;
+      Serial.println("Autoc disabled");
+      analogWrite(GREEN_PIN, 255);
+    }
+
     break;
   }
 
@@ -161,12 +186,36 @@ void mavlinkSenderLoop()
     rc.target_system = 1;
     rc.target_component = 1;
 
-    double c1 = 1500 + 500 * sin(millis() / 1000.0);
-    double c2 = 1500 + 500 * cos(millis() / 1000.0);
-    rc.chan1_raw = c1;
-    rc.chan2_raw = c2;
-    rc.chan3_raw = 2000;
-    rc.chan4_raw = 1800;
+    if (autoc_enabled)
+    {
+      double c1 = 1500 + 500 * sin(millis() / 1000.0);
+      double c2 = 1500 + 500 * cos(millis() / 1000.0);
+
+      rc.chan1_raw = c1;
+      rc.chan2_raw = c2;
+    }
+    else
+    {
+      rc.chan1_raw = 0;
+      rc.chan2_raw = 0;
+    }
+
+    rc.chan3_raw = 0;
+    rc.chan4_raw = 0;
+    rc.chan5_raw = 0;
+    rc.chan6_raw = 0;
+    rc.chan7_raw = 0;
+    rc.chan8_raw = 0;
+    rc.chan9_raw = 0;
+    rc.chan10_raw = 0;
+    rc.chan11_raw = 0;
+    rc.chan12_raw = 0;
+    rc.chan13_raw = 0;
+    rc.chan14_raw = 0;
+    rc.chan15_raw = 0;
+    rc.chan16_raw = 0;
+    rc.chan17_raw = 0;
+    rc.chan18_raw = 0;
 
     mavlink_msg_rc_channels_override_encode(100, 1, &msg, &rc);
     uint8_t buf2[MAVLINK_MAX_PACKET_LEN];

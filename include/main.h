@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <ArduinoBLE.h>
 #include <HardwareSerial.h>
-#include "mavlink_headers/common/mavlink.h"
+#include "MSP.h"
 
 // Define RGB pins
 #define RED_PIN 11
@@ -13,12 +13,12 @@
 #define HEARTBEAT_LED RED_PIN
 #define BLINK_INTERVAL_MSEC 250
 
-#define MAVLINK_SEND_INTERVAL_MSEC 200
+#define MSP_UPDATE_INTERVAL_MSEC 200
+#define MSP_SEND_INTERVAL_MSEC 100
 
 // interfaces
-void mavlinkSetup();
-void mavlinkReceiveLoop();
-void mavlinkSenderLoop();
+void msplinkSetup();
+void msplinkLoop();
 void ledSetup();
 void heartBeatLED();
 void blueToothSetup();

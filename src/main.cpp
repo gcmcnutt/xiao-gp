@@ -11,14 +11,13 @@ void setup()
   //   ; // Wait for serial connection (optional)
   // }
 
-  mavlinkSetup();
+  msplinkSetup();
   blueToothSetup();
 }
 
 void loop()
 {
   heartBeatLED();
-  mavlinkReceiveLoop();
-  mavlinkSenderLoop();
+  msplinkLoop();
   blueToothLoop();
 }

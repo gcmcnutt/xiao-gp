@@ -1,0 +1,3 @@
+[submodule "MSP-Arduino"]
+	path = MSP-Arduino
+	url = https://github.com/gcmcnutt/MSP-Arduino.git

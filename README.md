@@ -1,5 +1,5 @@
 iNav coprocessor
 
-- Mavlink interface
+- MSP interface
 - BTLE code uploader
 - Storage event logs in local storage

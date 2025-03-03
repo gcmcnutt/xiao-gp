@@ -1,3 +1,12 @@
-- generate headers in include/mavlink_headers
 - a simple arduino logger class to wrap diagnostic outputs
-- during init, need to capture systemid and componentid from heatbeat to use for messages sent.
+- motor mapping to a RC channel
+- verify quaternion orientation
+- unit conversions to the GP interface
+  - orientation
+  - location
+  - velocity
+- safety checks pre-arm -- to ensure the mode flip is safe and 
+  - rc failsafe
+  - rc disarm
+- the mcp override flip doesn't seem to be logged -- or isn't displayed
+- some sort of flight log in spi flash

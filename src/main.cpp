@@ -2,22 +2,27 @@
 
 void setup()
 {
-  // from off to red
+  // first thing to do, show a RED ledfrom off to red
   ledSetup();
 
-  Serial.begin(115200);
-  // while (!Serial)
-  // {
-  //   ; // Wait for serial connection (optional)
-  // }
+  // logger
+  consoleInit();
 
+  // msp link
   msplinkSetup();
+
+  // bluetooth sync handler
   blueToothSetup();
+
+  // flight controller
+  controllerSetup();
 }
 
 void loop()
 {
   heartBeatLED();
-  msplinkLoop();
   blueToothLoop();
+  mspUpdateState();
+  controllerUpdate();
+  mspSetControls();
 }

@@ -10,7 +10,7 @@ void blueToothSetup()
   // begin initialization
   if (!BLE.begin())
   {
-    Serial.println("starting Bluetooth® Low Energy module failed!");
+    logPrint(ERROR, "starting Bluetooth® Low Energy module failed!");
 
     // TODO don't hang here
     while (1)
@@ -33,7 +33,7 @@ void blueToothSetup()
   // start advertising
   BLE.advertise();
 
-  Serial.println("BLE LED Peripheral");
+  logPrint(INFO, "BLE LED Peripheral");
 }
 
 // polling loop for BT work
@@ -45,9 +45,7 @@ void blueToothLoop()
   // if a central is connected to peripheral
   if (central)
   {
-    Serial.print("Connected to central: ");
-    // print the central's MAC address:
-    Serial.println(central.address());
+    logPrint(DEBUG, "Connected to central: %s", central.address());
 
     // while the central is still connected to peripheral:
     while (central.connected())
@@ -56,19 +54,18 @@ void blueToothLoop()
       {
         if (switchCharacteristic.value())
         {
-          Serial.println("LED on");
           analogWrite(BLUE_PIN, 0);
+          logPrint(INFO, "LED on");
         }
         else
         {
-          Serial.println("LED off");
           analogWrite(BLUE_PIN, 255);
+          logPrint(INFO, "LED off");
         }
       }
     }
 
     // when the central disconnects, print it out:
-    Serial.print(F("Disconnected from central: "));
-    Serial.println(central.address());
+    logPrint(DEBUG, "Disconnected from central: %s", central.address());
   }
 }

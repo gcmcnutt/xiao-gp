@@ -1,4 +1,5 @@
 #include <main.h>
+#include <stdarg.h>
 
 void ledSetup()
 {
@@ -28,4 +29,61 @@ void heartBeatLED()
       analogWrite(HEARTBEAT_LED, 0);
     }
   }
+}
+
+void consoleInit() {
+  Serial.begin(115200);
+  // while (!Serial)
+  // {
+  //   ; // Wait for serial connection (optional)
+  // }
+}
+
+// Default log level (can be changed at runtime)
+static LogLevel currentLogLevel = DEBUG;
+
+// Buffer for formatted output
+char logBuffer[512];
+
+// Logger function with variable arguments
+void logPrint(LogLevel level, const char* format, ...) {
+  // Only print if level is high enough
+  if (level < currentLogLevel) {
+      return;
+  }
+
+  // Get current time in milliseconds
+  unsigned long timestamp = millis();
+
+  // Create prefix with timestamp and level
+  char prefix[32];
+  const char* levelStr;
+  
+  switch(level) {
+      case DEBUG:   levelStr = "d";   break;
+      case INFO:    levelStr = "i";    break;
+      case WARNING: levelStr = "w"; break;
+      case ERROR:   levelStr = "e";   break;
+      default:      levelStr = "?"; break;
+  }
+
+  snprintf(prefix, sizeof(prefix), "%07lu %s ", timestamp, levelStr);
+
+  // Handle the variable arguments
+  va_list args;
+  va_start(args, format);
+  
+  // First print to buffer
+  vsnprintf(logBuffer, sizeof(logBuffer), format, args);
+  
+  // Output to Serial
+  Serial.print(prefix);
+  Serial.println(logBuffer);
+  
+  va_end(args);
+}
+
+// Optional: Function to set log level
+void setLogLevel(LogLevel level) {
+  currentLogLevel = level;
 }

@@ -15,10 +15,28 @@
 
 #define MSP_UPDATE_INTERVAL_MSEC 200
 #define MSP_SEND_INTERVAL_MSEC 100
+#define MSP_REPLY_TIMOUT_MSEC 50
+
+// Define log levels
+enum LogLevel
+{
+  DEBUG = 0,
+  INFO = 1,
+  WARNING = 2,
+  ERROR = 3
+};
+
+// utils
+void consoleInit();
+void logPrint(LogLevel level, const char* format, ...);
+void setLogLevel(LogLevel level);
 
 // interfaces
 void msplinkSetup();
-void msplinkLoop();
+void mspUpdateState();
+void controllerSetup();
+void controllerUpdate();
+void mspSetControls();
 void ledSetup();
 void heartBeatLED();
 void blueToothSetup();

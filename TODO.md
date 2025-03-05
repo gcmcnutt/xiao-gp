@@ -1,4 +1,3 @@
-- a simple arduino logger class to wrap diagnostic outputs
 - motor mapping to a RC channel
 - verify quaternion orientation
 - unit conversions to the GP interface
@@ -10,3 +9,4 @@
   - rc disarm
 - the mcp override flip doesn't seem to be logged -- or isn't displayed
 - some sort of flight log in spi flash
+

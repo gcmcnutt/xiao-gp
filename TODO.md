@@ -9,4 +9,5 @@
   - rc disarm
 - the mcp override flip doesn't seem to be logged -- or isn't displayed
 - some sort of flight log in spi flash
+- seems the msp_status should send an array of unsigned32 as a packed bit field.  is only 32 bits right now.
 

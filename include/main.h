@@ -4,6 +4,7 @@
 #include <ArduinoBLE.h>
 #include <HardwareSerial.h>
 #include "MSP.h"
+#include "state.h"
 
 // Define RGB pins
 #define RED_PIN 11
@@ -15,7 +16,13 @@
 
 #define MSP_UPDATE_INTERVAL_MSEC 200
 #define MSP_SEND_INTERVAL_MSEC 100
-#define MSP_REPLY_TIMOUT_MSEC 50
+#define MSP_REPLY_TIMEOUT_MSEC 50
+#define MSP_LOS_INTERVAL_MSEC (2000)
+
+#define MSP_DEFAULT_CHANNEL_VALUE (1500)
+#define MSP_ARM_CHANNEL (8)
+#define MSP_ARMED_VALUE (1600)
+#define MSP_ARM_CYCLE_COUNT (2)
 
 // Define log levels
 enum LogLevel

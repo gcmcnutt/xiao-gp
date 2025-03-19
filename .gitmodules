@@ -1,3 +1,9 @@
 [submodule "MSP-Arduino"]
 	path = MSP-Arduino
 	url = https://github.com/gcmcnutt/MSP-Arduino.git
+[submodule "include/ArduinoEigen"]
+	path = include/ArduinoEigen
+	url = https://github.com/hideakitai/ArduinoEigen.git
+[submodule "include/ArxTypeTraits"]
+	path = include/ArxTypeTraits
+	url = https://github.com/hideakitai/ArxTypeTraits

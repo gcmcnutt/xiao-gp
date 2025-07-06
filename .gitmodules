@@ -7,3 +7,6 @@
 [submodule "include/ArxTypeTraits"]
 	path = include/ArxTypeTraits
 	url = https://github.com/hideakitai/ArxTypeTraits
+[submodule "include/GP"]
+	path = include/GP
+	url = https://github.com/gcmcnutt/GP.git

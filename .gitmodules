@@ -6,7 +6,7 @@
 	url = https://github.com/hideakitai/ArduinoEigen.git
 [submodule "include/ArxTypeTraits"]
 	path = include/ArxTypeTraits
-	url = https://github.com/hideakitai/ArxTypeTraits
+	url = https://github.com/hideakitai/ArxTypeTraits.git
 [submodule "include/GP"]
 	path = include/GP
 	url = https://github.com/gcmcnutt/GP.git

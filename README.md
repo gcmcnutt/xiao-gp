@@ -1,6 +1,29 @@
 iNav coprocessor
 
-- MSP interface
+# Compiling in platformio
+
+# Debugging on wsl
+Need to ensure access to the usb port when on wsl.  First figure out the jtag debug port -- could use usbipd list -- also might need to change the mode of the device in WSL to 0666 -- also need to do the same for the usb port for the usb console output
+
+```powershell
+PS C:\Users\gcmcn> usbipd attach --wsl --busid 4-4 -a
+usbipd: info: Using WSL distribution 'Ubuntu' to attach; the device will be available in all WSL 2 distributions.
+usbipd: info: Detected networking mode 'nat'.
+usbipd: info: Using IP address 172.17.32.1 to reach the host.
+usbipd: info: Starting endless attach loop; press Ctrl+C to quit.
+WSL Monitoring host 172.17.32.1 for BUSID: 4-4
+WSL 2025-07-07 18:09:25 Device 4-4 is available. Attempting to attach...
+WSL 2025-07-07 18:09:25 Attach command for device 4-4 succeeded.
+WSL 2025-07-07 18:09:33 Device 4-4 is now attached.
+```
+
+# Settings to use iNav
+- msp_override_channels = 15 (or 7 if just aet)
+- msp override as a mode configured to a switch
+- failsafe to RTH most likely
+- consider allow rearm in flight
+
+# Other
 - BTLE code uploader
 - Storage event logs in local storage
 

@@ -2,5 +2,5 @@
   "files.associations": {
     "geometry": "cpp"
   },
-  "cmake.sourceDirectory": "C:/Users/gcmcn/OneDrive/Documents/Dev/xiao-gp/.pio/libdeps/xiaoblesense_arduinocore_mbed/eigen/unsupported/doc/examples"
+  "cmake.sourceDirectory": "/home/gmcnutt/xiao-gp/include/GP/autoc"
 }

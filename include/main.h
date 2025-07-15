@@ -43,6 +43,7 @@ void msplinkSetup();
 void mspUpdateState();
 void controllerSetup();
 void controllerUpdate();
+void updatePathIndex();
 void mspSetControls();
 void ledSetup();
 void heartBeatLED();

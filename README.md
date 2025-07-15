@@ -1,6 +1,18 @@
-iNav coprocessor
+iNav coprocessor with Genetic Programming Flight Control
 
-# Compiling in platformio
+This project implements a small footprint genetic programming flight controller that integrates with INAV via MSP protocol. It uses a compiled GP evaluator approach for embedded deployment.
+
+## GP Integration
+
+The flight controller uses evolved genetic programs compiled to direct C++ code for minimal memory footprint. See `GP_INTEGRATION.md` for detailed architecture and workflow.
+
+**Key Features:**
+- Compiled GP evaluator (~5KB vs ~500KB for full GP library)
+- MSP integration with INAV flight controller
+- ArduinoEigen for embedded linear algebra
+- Bluetooth connectivity and logging
+
+## Compiling in platformio
 
 # Debugging on wsl
 Need to ensure access to the usb port when on wsl.  First figure out the jtag debug port -- could use usbipd list -- also might need to change the mode of the device in WSL to 0666 -- also need to do the same for the usb port for the usb console output

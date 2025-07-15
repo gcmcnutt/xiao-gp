@@ -4,3 +4,6 @@
 .vscode/launch.json
 .vscode/ipch
 build
+
+# Development: ignore GP symlink when using local clone
+# (see dev-setup.sh for switching between submodule and symlink modes)

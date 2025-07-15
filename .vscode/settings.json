@@ -2,5 +2,5 @@
   "files.associations": {
     "geometry": "cpp"
   },
-  "cmake.sourceDirectory": "/home/gmcnutt/xiao-gp/include/GP/autoc",
+  "cmake.sourceDirectory": "/home/gmcnutt/GP/autoc",
 }

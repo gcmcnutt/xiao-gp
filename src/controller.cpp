@@ -1,8 +1,7 @@
 #include <main.h>
 #include <ArduinoEigenDense.h>
 
-#include "GP/autoc/aircraft_state.h"
-#include "gp_evaluator.h"
+#include "GP/autoc/gp_evaluator.h"
 
 using namespace Eigen;
 

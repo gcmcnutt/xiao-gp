@@ -1,17 +1,26 @@
 // Generated GP Evaluator - DO NOT EDIT MANUALLY
+// S3 Key: autoc-9223370284310980799-2025-07-15T01:43:15.008Z/gen9900.dmp
+// Generation: 9900
 // Generated from GP with fitness: 0
 // GP Length: 82, Depth: 16
+//
+// Human readable GP structure:
+// GP: (SIN (SETROLL (GETDPHI (GETDTHETA (SUB (SETTHROTTLE (COS (SIN (GETDTARGET 2)))) (GT (GT (ADD (GETDTARGET (SIN (GETDTARGET 2))) (ADD (ADD (GETDPHI GETPITCH) (ADD GETPITCH GETROLL)) (GETDTHETA (IF GETROLL 2 0)))) (DIV (GETDPHI (SIN (GETDTHETA (IF 0 2 0)))) (COS (SETPITCH (GETDTHETA (GETDTARGET GETROLL)))))) (GETDTHETA (MUL (COS (SETROLL GETTHROTTLE)) (IF (GETDTHETA (IF GETROLL 2 0)) (SETTHROTTLE (ADD (SETTHROTTLE (COS (GETDTHETA (COS GETDHOME)))) (SIN (DIV (DIV (GETDTARGET GETROLL) (GT PI GETROLL)) (GETDTHETA (GETDTARGET 1)))))) (MUL (IF 0 2 0) (EQ (EQ GETVEL GETTHROTTLE) (SIN GETPITCH))))))))))))
 
 #include <cmath>
 #include <algorithm>
 #include <vector>
 #ifndef GP_BUILD
 #include <ArduinoEigenDense.h>
+#include "GP/autoc/aircraft_state.h"
 #else
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <boost/serialization/version.hpp>
+#include <boost/serialization/access.hpp>
+#include <boost/format.hpp>
+#include "aircraft_state.h"
 #endif
-#include "GP/autoc/aircraft_state.h"
 
 static int getIndex(const std::vector<Path>& path, double arg) {
   extern AircraftState aircraftState;

@@ -6,6 +6,9 @@
 #include "MSP.h"
 #include "state.h"
 
+// Forward declarations
+struct AircraftState;
+
 // Define RGB pins
 #define RED_PIN 11
 #define GREEN_PIN 12
@@ -48,3 +51,9 @@ void ledSetup();
 void heartBeatLED();
 void blueToothSetup();
 void blueToothLoop();
+
+// GP rabbit path following functions
+void initializeRabbitPathSystem();
+void convertMSPStateToAircraftState(AircraftState& aircraftState);
+int getRabbitPathIndex(double rabbit_distance);
+int convertToMSPChannel(double gp_command);

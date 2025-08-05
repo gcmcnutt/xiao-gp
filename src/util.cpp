@@ -40,7 +40,7 @@ void consoleInit() {
 }
 
 // Default log level (can be changed at runtime)
-static LogLevel currentLogLevel = DEBUG;
+static LogLevel currentLogLevel = INFO;
 
 // Buffer for formatted output
 char logBuffer[512];

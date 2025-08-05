@@ -1,8 +1,26 @@
 #include <main.h>
+#include <GP/autoc/aircraft_state.h>
+#include <embedded_pathgen.h>
+#include <GP/autoc/gp_evaluator.h>
+#include <vector>
 
 MSP msp;
 
 State state;
+
+// GP Rabbit Path Following System
+static EmbeddedLongSequentialPath path_generator;
+static std::vector<Path> flight_path;
+static AircraftState aircraft_state;
+static bool autoc_enabled_prev = false;
+static unsigned long rabbit_start_time = 0;
+static bool rabbit_active = false;
+static int current_path_index = 0;
+static Path gp_path_segment; // Single GP-compatible path segment for evaluator
+static unsigned long last_gp_eval_time = 0;
+static int cached_roll_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+static int cached_pitch_cmd = MSP_DEFAULT_CHANNEL_VALUE;  
+static int cached_throttle_cmd = MSP_DEFAULT_CHANNEL_VALUE;
 
 void msplinkSetup()
 {
@@ -116,6 +134,20 @@ void mspUpdateState()
     logPrint(INFO, "Autoc disabled");
     analogWrite(GREEN_PIN, 255);
   }
+
+  // Edge detection for autoc_enabled state
+  if (state.autoc_enabled && !autoc_enabled_prev) {
+    // Rising edge: initialize rabbit path following system
+    initializeRabbitPathSystem();
+    logPrint(INFO, "Rabbit path system initialized - starting flight test");
+  }
+  else if (!state.autoc_enabled && autoc_enabled_prev) {
+    // Falling edge: stop rabbit system
+    rabbit_active = false;
+    logPrint(INFO, "Rabbit path system stopped");
+  }
+  
+  autoc_enabled_prev = state.autoc_enabled;
 }
 
 void mspSetControls()
@@ -126,20 +158,138 @@ void mspSetControls()
   {
     lastSendTime = millis();
 
-    // synthesize some output values for pitch/roll
-    if (state.autoc_enabled)
+    // GP rabbit path following control
+    if (state.autoc_enabled && rabbit_active && !flight_path.empty())
     {
-      int c1 = 1500 + 500 * sin(millis() / 1000.0);
-      int c2 = 1500 + 500 * cos(millis() / 1000.0);
-      int c3 = 1000 + (millis() % 2000) / 2;
-
-      state.command_buffer.channel[0] = c1;
-      state.command_buffer.channel[1] = c2;
-      state.command_buffer.channel[2] = c3;
-      msp.send(MSP_SET_RAW_RC, &state.command_buffer, sizeof(state.command_buffer));
-      logPrint(DEBUG, ">>> Sent MSP_SET_RAW_RC [1:%d, 2:%d, 3:%d]", c1, c2, c3);
-
+      unsigned long current_time = millis();
+      bool need_new_gp_eval = (current_time - last_gp_eval_time >= MSP_UPDATE_INTERVAL_MSEC);
       
+      if (need_new_gp_eval) {
+        // GP evaluation every 200ms - calculate new commands
+        unsigned long elapsed_msec = current_time - rabbit_start_time;
+        double elapsed_sec = elapsed_msec / 1000.0;
+        double rabbit_distance = SIM_RABBIT_VELOCITY * elapsed_sec;
+        
+        // Find current path segment based on rabbit distance
+        current_path_index = getRabbitPathIndex(rabbit_distance);
+        if (current_path_index < flight_path.size()) {
+          gp_path_segment = flight_path[current_path_index];
+          
+          // Convert MSP state to AircraftState for GP evaluator
+          convertMSPStateToAircraftState(aircraft_state);
+          
+          // Call GP evaluator with aircraft state and target position
+          double gp_output = evaluateGPSimple(aircraft_state, gp_path_segment, 0.0);
+          
+          // Convert GP-controlled aircraft commands to MSP RC values and cache them
+          cached_roll_cmd = convertToMSPChannel(aircraft_state.getRollCommand());
+          cached_pitch_cmd = convertToMSPChannel(aircraft_state.getPitchCommand());
+          cached_throttle_cmd = convertToMSPChannel(aircraft_state.getThrottleCommand());
+          
+          last_gp_eval_time = current_time;
+          
+          logPrint(INFO, "GP Eval: pos=[%.1f,%.1f,%.1f] target=[%.1f,%.1f,%.1f] dist=%.1f idx=%d cmd=[%d,%d,%d] out=%.3f", 
+                   aircraft_state.getPosition()[0], aircraft_state.getPosition()[1], aircraft_state.getPosition()[2],
+                   gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
+                   rabbit_distance, current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, gp_output);
+        }
+      }
+      
+      // Send cached commands every 100ms to prevent INAV timeout
+      state.command_buffer.channel[0] = cached_roll_cmd;    // Roll
+      state.command_buffer.channel[1] = cached_pitch_cmd;   // Pitch  
+      state.command_buffer.channel[2] = cached_throttle_cmd; // Throttle
+      msp.send(MSP_SET_RAW_RC, &state.command_buffer, sizeof(state.command_buffer));
+      
+      if (!need_new_gp_eval) {
+        logPrint(DEBUG, "GP Send: cached cmd=[%d,%d,%d]", cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd);
+      }
     }
   }
+}
+
+// Initialize the rabbit path following system when autoc_enabled goes true
+void initializeRabbitPathSystem() {
+  // 1. Set current craft state to origin (arm point becomes origin)
+  if (state.raw_gps_valid && state.attitude_quaternion_valid) {
+    logPrint(INFO, "Origin set to current GPS position (arm point)");
+  }
+  
+  // 2. Generate longSequential path using embedded pathgen system
+  path_generator.generatePath(40.0, 100.0, SIM_INITIAL_ALTITUDE);
+  path_generator.copyToVector(flight_path);
+  
+  logPrint(INFO, "Generated GP path with %d segments, length %.1f m", 
+           flight_path.size(), path_generator.getTotalPathLength());
+  
+  // 3. Start time-based rabbit system
+  rabbit_start_time = millis();
+  rabbit_active = true;
+  current_path_index = 0;
+  
+  // 4. Initialize aircraft state from current MSP data
+  convertMSPStateToAircraftState(aircraft_state);
+  
+  logPrint(INFO, "Rabbit started at velocity %.1f m/s", SIM_RABBIT_VELOCITY);
+}
+
+// Convert MSP state data to AircraftState for GP evaluator
+void convertMSPStateToAircraftState(AircraftState& aircraftState) {
+  // Use MSP data that was already collected in mspUpdateState()
+  if (!state.attitude_quaternion_valid || !state.raw_gps_valid) {
+    return;
+  }
+  
+  // Convert MSP quaternion to Eigen quaternion
+  Eigen::Quaterniond orientation(
+    state.attitude_quaternion.q[0],  // w
+    state.attitude_quaternion.q[1],  // x
+    state.attitude_quaternion.q[2],  // y
+    state.attitude_quaternion.q[3]   // z
+  );
+  
+  // Convert GPS position to NED coordinates relative to origin (arm point)
+  Eigen::Vector3d position(
+    0.0,  // North - use relative positioning from arm point
+    0.0,  // East
+    SIM_INITIAL_ALTITUDE  // Down (negative altitude)
+  );
+  
+  // Estimate velocity from GPS ground speed and course
+  Eigen::Vector3d velocity(
+    state.raw_gps.groundSpeed * cos(state.raw_gps.groundCourse * M_PI / 180.0) / 100.0,
+    state.raw_gps.groundSpeed * sin(state.raw_gps.groundCourse * M_PI / 180.0) / 100.0,
+    0.0
+  );
+  
+  // Update the AircraftState with current sensor data
+  aircraftState.setPosition(position);
+  aircraftState.setOrientation(orientation);
+  aircraftState.setVelocity(velocity);
+  aircraftState.setSimTimeMsec(state.asOfMsec);  // Use MSP timestamp
+  aircraftState.setThisPathIndex(current_path_index);
+}
+
+// Find path index based on rabbit distance along path
+int getRabbitPathIndex(double rabbit_distance) {
+  if (flight_path.empty()) return 0;
+  
+  // Find the path segment closest to the rabbit distance
+  for (size_t i = 0; i < flight_path.size(); i++) {
+    if (flight_path[i].distanceFromStart >= rabbit_distance) {
+      return (int)i;
+    }
+  }
+  
+  // If rabbit has gone beyond the path, return last segment
+  return (int)(flight_path.size() - 1);
+}
+
+// Convert GP command (-1 to 1) to MSP channel value (1000 to 2000)
+int convertToMSPChannel(double gp_command) {
+  // Clamp to [-1, 1] range
+  double clamped = (gp_command < -1.0) ? -1.0 : ((gp_command > 1.0) ? 1.0 : gp_command);
+  
+  // Convert to MSP range: -1 -> 1000, 0 -> 1500, 1 -> 2000
+  return (int)(1500 + clamped * 500);
 }

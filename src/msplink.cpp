@@ -178,8 +178,9 @@ void mspSetControls()
           // Convert MSP state to AircraftState for GP evaluator
           convertMSPStateToAircraftState(aircraft_state);
           
-          // Call GP evaluator with aircraft state and target position
-          double gp_output = evaluateGPSimple(aircraft_state, gp_path_segment, 0.0);
+          // Call GP evaluator with aircraft state and target position using unified interface
+          SinglePathProvider provider(gp_path_segment, current_path_index);
+          double gp_output = evaluateGP(aircraft_state, provider, 0.0);
           
           // Convert GP-controlled aircraft commands to MSP RC values and cache them
           cached_roll_cmd = convertToMSPChannel(aircraft_state.getRollCommand());

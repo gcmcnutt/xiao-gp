@@ -2,6 +2,7 @@
 #include <GP/autoc/aircraft_state.h>
 #include <embedded_pathgen.h>
 #include <GP/autoc/gp_evaluator_embedded.h>
+#include <gp_program.h>
 #include <vector>
 
 MSP msp;
@@ -178,9 +179,9 @@ void mspSetControls()
           // Convert MSP state to AircraftState for GP evaluator
           convertMSPStateToAircraftState(aircraft_state);
           
-          // Call GP evaluator with aircraft state and target position using embedded interface
-          // Uses either loaded GP program or fallback proportional control
-          double gp_output = evaluateGPSimple(aircraft_state, gp_path_segment, 0.0);
+          // Call generated GP program directly
+          SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
+          double gp_output = generatedGPProgram(pathProvider, aircraft_state, 0.0);
           
           // Convert GP-controlled aircraft commands to MSP RC values and cache them
           cached_roll_cmd = GPEvaluatorEmbedded::convertToMSPChannel(aircraft_state.getRollCommand());

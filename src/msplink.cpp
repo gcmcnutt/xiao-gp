@@ -1,7 +1,7 @@
 #include <main.h>
 #include <GP/autoc/aircraft_state.h>
 #include <embedded_pathgen.h>
-#include <GP/autoc/gp_evaluator.h>
+#include <GP/autoc/gp_evaluator_embedded.h>
 #include <vector>
 
 MSP msp;
@@ -178,14 +178,14 @@ void mspSetControls()
           // Convert MSP state to AircraftState for GP evaluator
           convertMSPStateToAircraftState(aircraft_state);
           
-          // Call GP evaluator with aircraft state and target position using unified interface
-          SinglePathProvider provider(gp_path_segment, current_path_index);
-          double gp_output = evaluateGP(aircraft_state, provider, 0.0);
+          // Call GP evaluator with aircraft state and target position using embedded interface
+          // Uses either loaded GP program or fallback proportional control
+          double gp_output = evaluateGPSimple(aircraft_state, gp_path_segment, 0.0);
           
           // Convert GP-controlled aircraft commands to MSP RC values and cache them
-          cached_roll_cmd = convertToMSPChannel(aircraft_state.getRollCommand());
-          cached_pitch_cmd = convertToMSPChannel(aircraft_state.getPitchCommand());
-          cached_throttle_cmd = convertToMSPChannel(aircraft_state.getThrottleCommand());
+          cached_roll_cmd = GPEvaluatorEmbedded::convertToMSPChannel(aircraft_state.getRollCommand());
+          cached_pitch_cmd = GPEvaluatorEmbedded::convertToMSPChannel(aircraft_state.getPitchCommand());
+          cached_throttle_cmd = GPEvaluatorEmbedded::convertToMSPChannel(aircraft_state.getThrottleCommand());
           
           last_gp_eval_time = current_time;
           
@@ -286,11 +286,4 @@ int getRabbitPathIndex(double rabbit_distance) {
   return (int)(flight_path.size() - 1);
 }
 
-// Convert GP command (-1 to 1) to MSP channel value (1000 to 2000)
-int convertToMSPChannel(double gp_command) {
-  // Clamp to [-1, 1] range
-  double clamped = (gp_command < -1.0) ? -1.0 : ((gp_command > 1.0) ? 1.0 : gp_command);
-  
-  // Convert to MSP range: -1 -> 1000, 0 -> 1500, 1 -> 2000
-  return (int)(1500 + clamped * 500);
-}
+// convertToMSPChannel now provided by GPEvaluatorEmbedded class

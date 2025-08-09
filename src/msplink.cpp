@@ -19,6 +19,9 @@ static bool rabbit_active = false;
 static int current_path_index = 0;
 static Path gp_path_segment; // Single GP-compatible path segment for evaluator
 static unsigned long last_gp_eval_time = 0;
+
+// Safety timeout for single GP test run (60 seconds max per run)
+#define GP_MAX_SINGLE_RUN_MSEC (60 * 1000)
 static int cached_roll_cmd = MSP_DEFAULT_CHANNEL_VALUE;
 static int cached_pitch_cmd = MSP_DEFAULT_CHANNEL_VALUE;  
 static int cached_throttle_cmd = MSP_DEFAULT_CHANNEL_VALUE;
@@ -144,8 +147,12 @@ void mspUpdateState()
   }
   else if (!state.autoc_enabled && autoc_enabled_prev) {
     // Falling edge: stop rabbit system
+    if (rabbit_active) {
+      unsigned long test_run_duration = millis() - rabbit_start_time;
+      logPrint(INFO, "GP Control: Switch disabled (%.1fs) - stopping test run", test_run_duration / 1000.0);
+    }
     rabbit_active = false;
-    logPrint(INFO, "Rabbit path system stopped");
+    logPrint(INFO, "Rabbit path system stopped - ready for next test run");
   }
   
   autoc_enabled_prev = state.autoc_enabled;
@@ -159,13 +166,35 @@ void mspSetControls()
   {
     lastSendTime = millis();
 
-    // GP rabbit path following control
-    if (state.autoc_enabled && rabbit_active && !flight_path.empty())
-    {
-      unsigned long current_time = millis();
-      bool need_new_gp_eval = (current_time - last_gp_eval_time >= MSP_UPDATE_INTERVAL_MSEC);
+    // Check for disarm or failsafe conditions before GP control
+    // Only check if we're currently enabled to avoid repeat logging
+    if (state.autoc_enabled && rabbit_active) {
+      bool isArmed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
+      bool isFailsafe = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_FAILSAFE);
       
-      if (need_new_gp_eval) {
+      if (!isArmed || isFailsafe) {
+        unsigned long test_run_duration = millis() - rabbit_start_time;
+        if (isFailsafe) {
+          logPrint(INFO, "GP Control: INAV failsafe activated (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+        } else {
+          logPrint(INFO, "GP Control: Aircraft disarmed (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+        }
+        state.autoc_enabled = false;
+        rabbit_active = false;
+        return;
+      }
+    }
+
+    // GP rabbit path following control - only if autoc is still enabled
+    if (!state.autoc_enabled || !rabbit_active || flight_path.empty()) {
+      return; // Exit early if GP control has been disabled
+    }
+    
+    // Proceed with GP control
+    unsigned long current_time = millis();
+    bool need_new_gp_eval = (current_time - last_gp_eval_time >= MSP_UPDATE_INTERVAL_MSEC);
+    
+    if (need_new_gp_eval) {
         // GP evaluation every 200ms - calculate new commands
         unsigned long elapsed_msec = current_time - rabbit_start_time;
         double elapsed_sec = elapsed_msec / 1000.0;
@@ -173,6 +202,26 @@ void mspSetControls()
         
         // Find current path segment based on rabbit distance
         current_path_index = getRabbitPathIndex(rabbit_distance);
+        
+        // Check termination conditions
+        unsigned long test_run_duration = current_time - rabbit_start_time;
+        
+        // Timeout check
+        if (test_run_duration > GP_MAX_SINGLE_RUN_MSEC) {
+          logPrint(INFO, "GP Control: Test run timeout (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+          state.autoc_enabled = false;
+          rabbit_active = false;
+          return;
+        }
+        
+        // End of path check
+        if (current_path_index >= flight_path.size() - 1) {
+          logPrint(INFO, "GP Control: End of path reached (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+          state.autoc_enabled = false;
+          rabbit_active = false;
+          return;
+        }
+        
         if (current_path_index < flight_path.size()) {
           gp_path_segment = flight_path[current_path_index];
           
@@ -203,9 +252,8 @@ void mspSetControls()
       state.command_buffer.channel[2] = cached_throttle_cmd; // Throttle
       msp.send(MSP_SET_RAW_RC, &state.command_buffer, sizeof(state.command_buffer));
       
-      if (!need_new_gp_eval) {
-        logPrint(DEBUG, "GP Send: cached cmd=[%d,%d,%d]", cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd);
-      }
+    if (!need_new_gp_eval) {
+      logPrint(DEBUG, "GP Send: cached cmd=[%d,%d,%d]", cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd);
     }
   }
 }

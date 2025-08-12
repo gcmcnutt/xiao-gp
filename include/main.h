@@ -56,5 +56,5 @@ void blueToothLoop();
 // GP rabbit path following functions
 void initializeRabbitPathSystem();
 void convertMSPStateToAircraftState(AircraftState& aircraftState);
-int getRabbitPathIndex(double rabbit_distance);
+int getRabbitPathIndex(unsigned long elapsed_msec);
 int convertToMSPChannel(double gp_command);

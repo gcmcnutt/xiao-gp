@@ -197,11 +197,9 @@ void mspSetControls()
     if (need_new_gp_eval) {
         // GP evaluation every 200ms - calculate new commands
         unsigned long elapsed_msec = current_time - rabbit_start_time;
-        double elapsed_sec = elapsed_msec / 1000.0;
-        double rabbit_distance = SIM_RABBIT_VELOCITY * elapsed_sec;
         
-        // Find current path segment based on rabbit distance
-        current_path_index = getRabbitPathIndex(rabbit_distance);
+        // Find current path segment based on elapsed time since autoc enabled
+        current_path_index = getRabbitPathIndex(elapsed_msec);
         
         // Check termination conditions
         unsigned long test_run_duration = current_time - rabbit_start_time;
@@ -239,10 +237,10 @@ void mspSetControls()
           
           last_gp_eval_time = current_time;
           
-          logPrint(INFO, "GP Eval: pos=[%.1f,%.1f,%.1f] target=[%.1f,%.1f,%.1f] dist=%.1f idx=%d cmd=[%d,%d,%d] out=%.3f", 
+          logPrint(INFO, "GP Eval: pos=[%.1f,%.1f,%.1f] target=[%.1f,%.1f,%.1f] time=%lums idx=%d cmd=[%d,%d,%d] out=%.3f", 
                    aircraft_state.getPosition()[0], aircraft_state.getPosition()[1], aircraft_state.getPosition()[2],
                    gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
-                   rabbit_distance, current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, gp_output);
+                   elapsed_msec, current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, gp_output);
         }
       }
       
@@ -320,18 +318,19 @@ void convertMSPStateToAircraftState(AircraftState& aircraftState) {
   aircraftState.setThisPathIndex(current_path_index);
 }
 
-// Find path index based on rabbit distance along path
-int getRabbitPathIndex(double rabbit_distance) {
+// Find path index based on elapsed time since autoc enabled
+int getRabbitPathIndex(unsigned long elapsed_msec) {
   if (flight_path.empty()) return 0;
   
-  // Find the path segment closest to the rabbit distance
-  for (size_t i = 0; i < flight_path.size(); i++) {
-    if (flight_path[i].distanceFromStart >= rabbit_distance) {
+  // Linear scan from current point to find the path segment just beyond where we are in time
+  // Since time only moves forward, start from the current index to avoid redundant searches
+  for (size_t i = current_path_index; i < flight_path.size(); i++) {
+    if (flight_path[i].simTimeMsec >= elapsed_msec) {
       return (int)i;
     }
   }
   
-  // If rabbit has gone beyond the path, return last segment
+  // If elapsed time has gone beyond the path, return last segment
   return (int)(flight_path.size() - 1);
 }
 

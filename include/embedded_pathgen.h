@@ -40,10 +40,8 @@ public:
         totalDistance += distance;
       }
       
-      segments[segment_count].start = point;
-      segments[segment_count].orientation = Eigen::Vector3d(1, 0, 0);
-      segments[segment_count].distanceFromStart = totalDistance;
-      segments[segment_count].radiansFromStart = 0.0;
+      segments[segment_count] = Path(point, Eigen::Vector3d(1, 0, 0), totalDistance, 0.0, 
+                                     (totalDistance / SIM_RABBIT_VELOCITY) * 1000.0);
       segment_count++;
     }
     
@@ -56,10 +54,8 @@ public:
       double distance = (point - segments[segment_count-1].start).norm();
       totalDistance += distance;
       
-      segments[segment_count].start = point;
-      segments[segment_count].orientation = Eigen::Vector3d(1, 0, 0);
-      segments[segment_count].distanceFromStart = totalDistance;
-      segments[segment_count].radiansFromStart = 0.0;
+      segments[segment_count] = Path(point, Eigen::Vector3d(1, 0, 0), totalDistance, 0.0, 
+                                     (totalDistance / SIM_RABBIT_VELOCITY) * 1000.0);
       segment_count++;
     }
   }

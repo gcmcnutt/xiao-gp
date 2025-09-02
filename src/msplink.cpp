@@ -152,6 +152,8 @@ void mspUpdateState()
       logPrint(INFO, "GP Control: Switch disabled (%.1fs) - stopping test run", test_run_duration / 1000.0);
     }
     rabbit_active = false;
+    
+    
     logPrint(INFO, "Rabbit path system stopped - ready for next test run");
   }
   
@@ -231,9 +233,9 @@ void mspSetControls()
           double gp_output = generatedGPProgram(pathProvider, aircraft_state, 0.0);
           
           // Convert GP-controlled aircraft commands to MSP RC values and cache them
-          cached_roll_cmd = GPEvaluatorEmbedded::convertToMSPChannel(aircraft_state.getRollCommand());
-          cached_pitch_cmd = GPEvaluatorEmbedded::convertToMSPChannel(aircraft_state.getPitchCommand());
-          cached_throttle_cmd = GPEvaluatorEmbedded::convertToMSPChannel(aircraft_state.getThrottleCommand());
+          cached_roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
+          cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
+          cached_throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
           
           last_gp_eval_time = current_time;
           
@@ -334,4 +336,21 @@ int getRabbitPathIndex(unsigned long elapsed_msec) {
   return (int)(flight_path.size() - 1);
 }
 
-// convertToMSPChannel now provided by GPEvaluatorEmbedded class
+// MSP channel conversion functions with correct polarity
+int convertRollToMSPChannel(double gp_command) {
+    // Roll: GP +1.0 = roll right = MSP 2000 (DIRECT mapping)
+    double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
+    return (int)(1500.0 + clamped * 500.0);
+}
+
+int convertPitchToMSPChannel(double gp_command) {
+    // Pitch: GP +1.0 = pitch up = MSP 1000 (INVERTED mapping to match CRRCSim)
+    double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
+    return (int)(1500.0 - clamped * 500.0);
+}
+
+int convertThrottleToMSPChannel(double gp_command) {
+    // Throttle: GP +1.0 = full throttle = MSP 2000 (DIRECT mapping)
+    double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
+    return (int)(1500.0 + clamped * 500.0);
+}

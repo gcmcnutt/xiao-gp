@@ -57,4 +57,6 @@ void blueToothLoop();
 void initializeRabbitPathSystem();
 void convertMSPStateToAircraftState(AircraftState& aircraftState);
 int getRabbitPathIndex(unsigned long elapsed_msec);
-int convertToMSPChannel(double gp_command);
+int convertRollToMSPChannel(double gp_command);
+int convertPitchToMSPChannel(double gp_command);
+int convertThrottleToMSPChannel(double gp_command);

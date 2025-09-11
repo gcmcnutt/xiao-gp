@@ -21,8 +21,7 @@ void setup()
 void loop()
 {
   heartBeatLED();
-  blueToothLoop();
+  // blueToothLoop();
 
   controllerUpdate();
-  mspSetControls();
 }

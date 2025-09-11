@@ -18,7 +18,7 @@ struct AircraftState;
 #define BLINK_INTERVAL_MSEC 250
 
 #define MSP_UPDATE_INTERVAL_MSEC 200
-#define MSP_SEND_INTERVAL_MSEC 100
+#define MSP_SEND_INTERVAL_MSEC 50
 #define MSP_REPLY_TIMEOUT_MSEC 50
 #define MSP_LOS_INTERVAL_MSEC 2000
 
@@ -54,7 +54,6 @@ void blueToothSetup();
 void blueToothLoop();
 
 // GP rabbit path following functions
-void initializeRabbitPathSystem();
 void convertMSPStateToAircraftState(AircraftState& aircraftState);
 int getRabbitPathIndex(unsigned long elapsed_msec);
 int convertRollToMSPChannel(double gp_command);

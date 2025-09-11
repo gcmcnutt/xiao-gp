@@ -67,6 +67,7 @@
 
 // commands
 #define MSP_SET_HEAD             211 // define a new heading hold direction
+#define MSP_WP                   118 // get waypoint (waypoint number, lat, lon, alt, action, p1, p2, p3, flags)
 #define MSP_SET_RAW_RC           200 // 8 rc chan
 #define MSP_SET_RAW_GPS          201 // fix, numsat, lat, lon, alt, speed
 #define MSP_SET_WP               209 // sets a given WP (WP#, lat, lon, alt, flags)
@@ -351,6 +352,24 @@ struct msp_misc_t {
 #define MSP_GPS_FIX_2D 1
 #define MSP_GPS_FIX_3D 2
 
+// values for msp_waypoint_t.action
+#define MSP_NAV_WP_ACTION_WAYPOINT  0x01
+#define MSP_NAV_WP_ACTION_HOLD_TIME 0x03
+#define MSP_NAV_WP_ACTION_RTH       0x04
+#define MSP_NAV_WP_ACTION_SET_POI   0x05
+#define MSP_NAV_WP_ACTION_JUMP      0x06
+#define MSP_NAV_WP_ACTION_SET_HEAD  0x07
+#define MSP_NAV_WP_ACTION_LAND      0x08
+
+// values for msp_waypoint_t.flag
+#define MSP_NAV_WP_FLAG_HOME 0x48
+#define MSP_NAV_WP_FLAG_LAST 0xA5
+
+// Special waypoint numbers
+#define MSP_WP_RTH_POSITION      0   // Return to home position
+#define MSP_WP_DESIRED_POSITION  254 // Current desired position
+#define MSP_WP_CURRENT_POSITION  255 // Current actual position
+
 
 // MSP_RAW_GPS reply
 struct msp_raw_gps_t {
@@ -370,6 +389,25 @@ struct msp_comp_gps_t {
   int16_t  distanceToHome;  // distance to home in meters
   int16_t  directionToHome; // direction to home in degrees
   uint8_t  heartbeat;       // toggles 0 and 1 for each change
+} __attribute__ ((packed));
+
+
+// MSP_WP reply
+struct msp_waypoint_t {
+  uint8_t  waypointNumber;  // waypoint number
+  uint8_t  action;          // waypoint action type (MSP_NAV_WP_ACTION_*)
+  int32_t  lat;             // latitude (degrees * 10,000,000)
+  int32_t  lon;             // longitude (degrees * 10,000,000)
+  int32_t  alt;             // altitude (centimeters)
+  int16_t  p1;              // parameter 1
+  int16_t  p2;              // parameter 2
+  int16_t  p3;              // parameter 3
+  uint8_t  flag;            // waypoint flags (MSP_NAV_WP_FLAG_*)
+} __attribute__ ((packed));
+
+// MSP_WP command (request waypoint data)
+struct msp_wp_request_t {
+  uint8_t  waypointNumber;  // waypoint number to request
 } __attribute__ ((packed));
 
 

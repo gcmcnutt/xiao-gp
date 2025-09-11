@@ -14,8 +14,8 @@ public:
     status_valid = false;
     rc_valid = false;
     attitude_quaternion_valid = false;
-    raw_gps_valid = false;
-    comp_gps_valid = false;
+    altitude_valid = false;
+    waypoint_valid = false;
   }
 
   void setAsOfMsec(unsigned long asOfMsec)
@@ -27,14 +27,14 @@ public:
   bool status_valid;
   bool rc_valid;
   bool attitude_quaternion_valid;
-  bool raw_gps_valid;
-  bool comp_gps_valid;
+  bool altitude_valid;
+  bool waypoint_valid;
 
   msp_status_t status;
   msp_rc_t rc;
   msp_attitude_quaternion_t attitude_quaternion;
-  msp_raw_gps_t raw_gps;
-  msp_comp_gps_t comp_gps;
+  msp_altitude_t altitude;
+  msp_waypoint_t waypoint;
 
   int autoc_countdown;
   bool autoc_enabled;

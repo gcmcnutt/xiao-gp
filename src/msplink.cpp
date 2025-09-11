@@ -13,18 +13,173 @@ State state;
 static EmbeddedLongSequentialPath path_generator;
 static std::vector<Path> flight_path;
 static AircraftState aircraft_state;
-static bool autoc_enabled_prev = false;
+static Path gp_path_segment; // Single GP-compatible path segment for evaluator
+
+// GP Control Timing and State
 static unsigned long rabbit_start_time = 0;
 static bool rabbit_active = false;
 static int current_path_index = 0;
-static Path gp_path_segment; // Single GP-compatible path segment for evaluator
-static unsigned long last_gp_eval_time = 0;
+
+// MSP Control Output Caching
+static int cached_roll_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+static int cached_pitch_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+static int cached_throttle_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+static unsigned long lastSendTime = 0;
+
+// Initial waypoint state for relative position calculations
+static bool initial_waypoint_cached = false;
+static int32_t initial_lat = 0;
+static int32_t initial_lon = 0;
+static int32_t initial_alt = 0;
+
+// Aircraft state tracking for position/velocity calculation
+static unsigned long prev_time = 0;
+static Eigen::Vector3d last_valid_position(0.0, 0.0, 0.0);
+static bool have_valid_position = false;
+static Eigen::Vector3d prev_position(0.0, 0.0, 0.0);
+static bool prev_position_valid = false;
 
 // Safety timeout for single GP test run (60 seconds max per run)
 #define GP_MAX_SINGLE_RUN_MSEC (60 * 1000)
-static int cached_roll_cmd = MSP_DEFAULT_CHANNEL_VALUE;
-static int cached_pitch_cmd = MSP_DEFAULT_CHANNEL_VALUE;  
-static int cached_throttle_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+
+// Unified GP State logging function
+void logGPState()
+{
+  // Get position/velocity data if available
+  String pos_str = "-", vel_str = "-", relvel_str = "-";
+  unsigned long time_val = state.asOfMsec;
+  
+  if (initial_waypoint_cached && !flight_path.empty())
+  {
+    Eigen::Vector3d pos = aircraft_state.getPosition();
+    Eigen::Vector3d vel = aircraft_state.getVelocity();
+    double relvel = aircraft_state.getRelVel();
+    
+    pos_str = String("[") + String(pos[0], 1) + "," + String(pos[1], 1) + "," + String(pos[2], 1) + "]";
+    vel_str = String("[") + String(vel[0], 1) + "," + String(vel[1], 1) + "," + String(vel[2], 1) + "]";
+    relvel_str = String(relvel, 1);
+    
+    if (rabbit_active) {
+      time_val = state.asOfMsec - rabbit_start_time; // Relative time during test
+    } else {
+      time_val = 0; // Test not active
+    }
+  }
+  
+  // Get attitude data if available
+  String att_str = "-";
+  if (state.attitude_quaternion_valid)
+  {
+    Eigen::Quaterniond orientation(
+        state.attitude_quaternion.q[0], // w
+        state.attitude_quaternion.q[1], // x
+        state.attitude_quaternion.q[2], // y
+        state.attitude_quaternion.q[3]  // z
+    );
+    Eigen::Vector3d euler = orientation.toRotationMatrix().eulerAngles(2, 1, 0); // ZYX order (yaw, pitch, roll)
+    att_str = String("[") + String(euler[2] * 180.0/M_PI, 1) + "," + String(euler[1] * 180.0/M_PI, 1) + "," + String(euler[0] * 180.0/M_PI, 1) + "]";
+  }
+  
+  // Get state flags and RC channels
+  bool armed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
+  bool failsafe = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_FAILSAFE);
+  int rc_ch1 = state.rc_valid ? state.rc.channelValue[0] : 0; // Roll
+  int rc_ch2 = state.rc_valid ? state.rc.channelValue[1] : 0; // Pitch
+  int rc_ch4 = state.rc_valid ? state.rc.channelValue[3] : 0; // Throttle
+  int rc_ch9 = state.rc_valid ? state.rc.channelValue[8] : 0; // Switch channel
+  
+  // Get quaternion data if available
+  String quat_str = "-";
+  if (state.attitude_quaternion_valid)
+  {
+    quat_str = String("[") + String(state.attitude_quaternion.q[0], 3) + "," + String(state.attitude_quaternion.q[1], 3) + 
+               "," + String(state.attitude_quaternion.q[2], 3) + "," + String(state.attitude_quaternion.q[3], 3) + "]";
+  }
+  
+  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s autoc=%s rc=[%d,%d,%d,%d] time=%lums",
+           pos_str.c_str(), vel_str.c_str(), att_str.c_str(), quat_str.c_str(), relvel_str.c_str(),
+           armed ? "Y" : "N", failsafe ? "Y" : "N", state.autoc_enabled ? "Y" : "N", 
+           rc_ch1, rc_ch2, rc_ch4, rc_ch9, time_val);
+}
+
+static void mspUpdateGPControl()
+{
+  // Check for disarm or failsafe conditions before GP control
+  // Only check if we're currently enabled to avoid repeat logging
+  if (state.autoc_enabled && rabbit_active)
+  {
+    bool isArmed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
+    bool isFailsafe = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_FAILSAFE);
+
+    if (!isArmed || isFailsafe)
+    {
+      unsigned long test_run_duration = millis() - rabbit_start_time;
+      if (isFailsafe)
+      {
+        logPrint(INFO, "GP Control: INAV failsafe activated (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+      }
+      else
+      {
+        logPrint(INFO, "GP Control: Aircraft disarmed (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+      }
+      state.autoc_enabled = false;
+      rabbit_active = false;
+      initial_waypoint_cached = false; // Reset position reference for next test
+      return;
+    }
+  }
+
+  // GP rabbit path following control - only if autoc is still enabled
+  if (!state.autoc_enabled || !rabbit_active || flight_path.empty())
+  {
+    return; // Exit early if GP control has been disabled
+  }
+
+  // Proceed with GP control
+  unsigned long current_time = millis();
+  unsigned long elapsed_msec = current_time - rabbit_start_time;
+
+  // Check termination conditions
+  if (elapsed_msec > GP_MAX_SINGLE_RUN_MSEC)
+  {
+    logPrint(INFO, "GP Control: Test run timeout (%.1fs) - stopping rabbit", elapsed_msec / 1000.0);
+    rabbit_active = false;
+    return;
+  }
+
+  // Find current path segment based on elapsed time since autoc enabled
+  current_path_index = getRabbitPathIndex(elapsed_msec);
+
+  // End of path check
+  if (current_path_index >= (int)flight_path.size() - 1)
+  {
+    logPrint(INFO, "GP Control: End of path reached (%.1fs) - stopping rabbit", elapsed_msec / 1000.0);
+    rabbit_active = false;
+    return;
+  }
+
+  // GP evaluation - calculate new commands
+  if (current_path_index < (int)flight_path.size())
+  {
+    gp_path_segment = flight_path[current_path_index];
+
+    // Set current path index for GP evaluation
+    aircraft_state.setThisPathIndex(current_path_index);
+
+    // Call generated GP program directly (aircraft_state is updated continuously in mspUpdateState)
+    SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
+    double gp_output = generatedGPProgram(pathProvider, aircraft_state, 0.0);
+
+    // Convert GP-controlled aircraft commands to MSP RC values and cache them
+    cached_roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
+    cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
+    cached_throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
+
+    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d cmd=[%d,%d,%d] out=%.3f time=%lums",
+             gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
+             current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, gp_output, elapsed_msec);
+  }
+}
 
 void msplinkSetup()
 {
@@ -46,60 +201,27 @@ void mspUpdateState()
   state.setAsOfMsec(millis());
 
   // get status
-  if (state.status_valid = msp.request(MSP_STATUS, &state.status, sizeof(state.status)))
+  state.status_valid = msp.request(MSP_STATUS, &state.status, sizeof(state.status));
+  if (!state.status_valid)
   {
-    logPrint(DEBUG, "STATUS {CycleTime:%d, FlightModeFlags:0x%x}",
-             state.status.cycleTime, state.status.flightModeFlags);
-  }
-  else
-  {
-    logPrint(ERROR, "*** Failed to get status");
-    return;
+    logPrint(ERROR, "*** CRITICAL: Failed to get MSP_STATUS - aborting MSP update cycle");
+    return; // Critical error - can't continue without status
   }
 
   // get RC data
-  if (state.rc_valid = msp.request(MSP_RC, &state.rc, sizeof(state.rc)))
-  {
-    logPrint(DEBUG, "RC_CHANNELS {1:%d, 2:%d, 3:%d, 4:%d, 9:%d}",
-             state.rc.channelValue[0], state.rc.channelValue[1], state.rc.channelValue[2], state.rc.channelValue[3], state.rc.channelValue[8]);
-  }
-  else
-  {
-    logPrint(ERROR, "*** Failed to get RC data");
-  }
+  state.rc_valid = msp.request(MSP_RC, &state.rc, sizeof(state.rc));
 
   // attitude quaternion
-  if (state.attitude_quaternion_valid = msp.request(MSP_ATTITUDE_QUATERNION, &state.attitude_quaternion, sizeof(state.attitude_quaternion)))
-  {
-    logPrint(DEBUG, "ATTITUDE_QUATERNION {q0:%f, q1:%f, q2:%f, q3:%f}",
-             state.attitude_quaternion.q[0], state.attitude_quaternion.q[1], state.attitude_quaternion.q[2], state.attitude_quaternion.q[3]);
-  }
-  else
-  {
-    logPrint(ERROR, "*** Failed to get attitude quaternion");
-  }
+  state.attitude_quaternion_valid = msp.request(MSP_ATTITUDE_QUATERNION, &state.attitude_quaternion, sizeof(state.attitude_quaternion));
 
-  // location
-  if (state.raw_gps_valid = msp.request(MSP_RAW_GPS, &state.raw_gps, sizeof(state.raw_gps)))
-  {
-    logPrint(DEBUG, "RAW_GPS {FixType:%d, NumSatellites:%d, LatDeg:%f, LonDeg:%f, AltM:%d, GroundSpeed:%d, GroundCourse:%d, HDOP:%d}",
-             state.raw_gps.fixType, state.raw_gps.numSat, state.raw_gps.lat / 1.0e7, state.raw_gps.lon / 1.0e7, state.raw_gps.alt, state.raw_gps.groundSpeed, state.raw_gps.groundCourse, state.raw_gps.hdop);
-  }
-  else
-  {
-    logPrint(ERROR, "*** Failed to get raw GPS data");
-  }
+  // current position waypoint (waypoint #255 = current estimated position)
+  msp_wp_request_t wp_request;
+  wp_request.waypointNumber = MSP_WP_CURRENT_POSITION;
 
-  // comp_gps
-  if (state.comp_gps_valid = msp.request(MSP_COMP_GPS, &state.comp_gps, sizeof(state.comp_gps)))
-  {
-    logPrint(DEBUG, "COMP_GPS {DistM:%d, DirDeg:%d}",
-             state.comp_gps.distanceToHome, state.comp_gps.directionToHome);
-  }
-  else
-  {
-    logPrint(ERROR, "*** Failed to get comp GPS data");
-  }
+  // Send waypoint request and receive waypoint response
+  msp.send(MSP_WP, &wp_request, sizeof(wp_request));
+  uint16_t recvSize;
+  state.waypoint_valid = msp.waitFor(MSP_WP, &state.waypoint, sizeof(state.waypoint), &recvSize);
 
   // ok, let's see what we fetched and updated.
   // first, check if we have a valid status
@@ -123,234 +245,217 @@ void mspUpdateState()
     state.autoc_countdown = 0;
   }
 
-  // then, countdown timer on channel 9 to see if we should auto-enable
-  if (state.autoc_countdown > MSP_ARM_CYCLE_COUNT &&
-      state.autoc_enabled == false)
-  {
-    state.autoc_enabled = true;
-    logPrint(INFO, "Autoc enabled");
-    analogWrite(GREEN_PIN, 0);
-  }
-  else if (state.autoc_countdown <= MSP_ARM_CYCLE_COUNT &&
-           state.autoc_enabled == true)
-  {
-    state.autoc_enabled = false;
-    logPrint(INFO, "Autoc disabled");
-    analogWrite(GREEN_PIN, 255);
-  }
+  // Countdown timer logic to determine autoc_enabled state
+  bool new_autoc_enabled = state.autoc_countdown > MSP_ARM_CYCLE_COUNT;
 
-  // Edge detection for autoc_enabled state
-  if (state.autoc_enabled && !autoc_enabled_prev) {
-    // Rising edge: initialize rabbit path following system
-    initializeRabbitPathSystem();
-    logPrint(INFO, "Rabbit path system initialized - starting flight test");
+  // Handle state transitions
+  if (new_autoc_enabled && !state.autoc_enabled)
+  {
+    // Rising edge: enable autoc and initialize rabbit system
+    
+    // 1. Cache initial waypoint state for relative position calculations
+    if (state.waypoint_valid)
+    {
+      initial_lat = state.waypoint.lat;
+      initial_lon = state.waypoint.lon;
+      initial_alt = state.waypoint.alt;
+      initial_waypoint_cached = true;
+
+      // 2. Generate longSequential path using embedded pathgen system
+      path_generator.generatePath(40.0, 100.0, SIM_INITIAL_ALTITUDE);
+      path_generator.copyToVector(flight_path);
+
+      // 3. Start time-based rabbit system
+      rabbit_start_time = millis();
+      rabbit_active = true;
+      current_path_index = 0;
+
+      // Enable autoc and indicate success
+      state.autoc_enabled = true;
+      analogWrite(GREEN_PIN, 0);
+      logPrint(INFO, "GP Control: Switch enabled - cached waypoint lat=%d, lon=%d, alt=%d - starting flight test", initial_lat, initial_lon, initial_alt);
+    }
+    else
+    {
+      // Fatal error - cannot start GP control without valid waypoint data
+      initial_waypoint_cached = false;
+      logPrint(ERROR, "*** FATAL: No valid waypoint data available for GP control - cannot enable autoc");
+      // Do not enable autoc_enabled or change LED state
+    }
   }
-  else if (!state.autoc_enabled && autoc_enabled_prev) {
-    // Falling edge: stop rabbit system
-    if (rabbit_active) {
+  else if (!new_autoc_enabled && state.autoc_enabled)
+  {
+    // Falling edge: disable autoc and stop rabbit system
+    state.autoc_enabled = false;
+    analogWrite(GREEN_PIN, 255);
+    if (rabbit_active)
+    {
       unsigned long test_run_duration = millis() - rabbit_start_time;
       logPrint(INFO, "GP Control: Switch disabled (%.1fs) - stopping test run", test_run_duration / 1000.0);
     }
     rabbit_active = false;
-    
-    
-    logPrint(INFO, "Rabbit path system stopped - ready for next test run");
+    initial_waypoint_cached = false; // Reset cached state
   }
-  
-  autoc_enabled_prev = state.autoc_enabled;
+
+  // Update aircraft state on every MSP cycle for continuous position/velocity tracking
+  if (initial_waypoint_cached)
+  {
+    convertMSPStateToAircraftState(aircraft_state);
+  }
+
+  // Update GP control and cache commands when enabled
+  mspUpdateGPControl();
+
+  // Always log unified GP State with available data or "-" for missing
+  logGPState();
 }
 
 void mspSetControls()
 {
-  // send interval
-  static unsigned long lastSendTime = 0;
+  // Send cached commands every 50ms to prevent INAV timeout
   if (millis() - lastSendTime >= MSP_SEND_INTERVAL_MSEC)
   {
     lastSendTime = millis();
 
-    // Check for disarm or failsafe conditions before GP control
-    // Only check if we're currently enabled to avoid repeat logging
-    if (state.autoc_enabled && rabbit_active) {
-      bool isArmed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
-      bool isFailsafe = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_FAILSAFE);
-      
-      if (!isArmed || isFailsafe) {
-        unsigned long test_run_duration = millis() - rabbit_start_time;
-        if (isFailsafe) {
-          logPrint(INFO, "GP Control: INAV failsafe activated (%.1fs) - disabling autoc", test_run_duration / 1000.0);
-        } else {
-          logPrint(INFO, "GP Control: Aircraft disarmed (%.1fs) - disabling autoc", test_run_duration / 1000.0);
-        }
-        state.autoc_enabled = false;
-        rabbit_active = false;
-        return;
-      }
-    }
-
-    // GP rabbit path following control - only if autoc is still enabled
-    if (!state.autoc_enabled || !rabbit_active || flight_path.empty()) {
-      return; // Exit early if GP control has been disabled
-    }
-    
-    // Proceed with GP control
-    unsigned long current_time = millis();
-    bool need_new_gp_eval = (current_time - last_gp_eval_time >= MSP_UPDATE_INTERVAL_MSEC);
-    
-    if (need_new_gp_eval) {
-        // GP evaluation every 200ms - calculate new commands
-        unsigned long elapsed_msec = current_time - rabbit_start_time;
-        
-        // Find current path segment based on elapsed time since autoc enabled
-        current_path_index = getRabbitPathIndex(elapsed_msec);
-        
-        // Check termination conditions
-        unsigned long test_run_duration = current_time - rabbit_start_time;
-        
-        // Timeout check
-        if (test_run_duration > GP_MAX_SINGLE_RUN_MSEC) {
-          logPrint(INFO, "GP Control: Test run timeout (%.1fs) - disabling autoc", test_run_duration / 1000.0);
-          state.autoc_enabled = false;
-          rabbit_active = false;
-          return;
-        }
-        
-        // End of path check
-        if (current_path_index >= flight_path.size() - 1) {
-          logPrint(INFO, "GP Control: End of path reached (%.1fs) - disabling autoc", test_run_duration / 1000.0);
-          state.autoc_enabled = false;
-          rabbit_active = false;
-          return;
-        }
-        
-        if (current_path_index < flight_path.size()) {
-          gp_path_segment = flight_path[current_path_index];
-          
-          // Convert MSP state to AircraftState for GP evaluator
-          convertMSPStateToAircraftState(aircraft_state);
-          
-          // Call generated GP program directly
-          SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
-          double gp_output = generatedGPProgram(pathProvider, aircraft_state, 0.0);
-          
-          // Convert GP-controlled aircraft commands to MSP RC values and cache them
-          cached_roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
-          cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
-          cached_throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
-          
-          last_gp_eval_time = current_time;
-          
-          logPrint(INFO, "GP Eval: pos=[%.1f,%.1f,%.1f] target=[%.1f,%.1f,%.1f] time=%lums idx=%d cmd=[%d,%d,%d] out=%.3f", 
-                   aircraft_state.getPosition()[0], aircraft_state.getPosition()[1], aircraft_state.getPosition()[2],
-                   gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
-                   elapsed_msec, current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, gp_output);
-        }
-      }
-      
-      // Send cached commands every 100ms to prevent INAV timeout
-      state.command_buffer.channel[0] = cached_roll_cmd;    // Roll
-      state.command_buffer.channel[1] = cached_pitch_cmd;   // Pitch  
-      state.command_buffer.channel[2] = cached_throttle_cmd; // Throttle
-      msp.send(MSP_SET_RAW_RC, &state.command_buffer, sizeof(state.command_buffer));
-      
-    if (!need_new_gp_eval) {
-      logPrint(DEBUG, "GP Send: cached cmd=[%d,%d,%d]", cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd);
-    }
+    // Always send cached commands (updated by controllerUpdate when needed)
+    state.command_buffer.channel[0] = cached_roll_cmd;     // Roll
+    state.command_buffer.channel[1] = cached_pitch_cmd;    // Pitch
+    state.command_buffer.channel[2] = cached_throttle_cmd; // Throttle
+    msp.send(MSP_SET_RAW_RC, &state.command_buffer, sizeof(state.command_buffer));
   }
-}
-
-// Initialize the rabbit path following system when autoc_enabled goes true
-void initializeRabbitPathSystem() {
-  // 1. Set current craft state to origin (arm point becomes origin)
-  if (state.raw_gps_valid && state.attitude_quaternion_valid) {
-    logPrint(INFO, "Origin set to current GPS position (arm point)");
-  }
-  
-  // 2. Generate longSequential path using embedded pathgen system
-  path_generator.generatePath(40.0, 100.0, SIM_INITIAL_ALTITUDE);
-  path_generator.copyToVector(flight_path);
-  
-  logPrint(INFO, "Generated GP path with %d segments, length %.1f m", 
-           flight_path.size(), path_generator.getTotalPathLength());
-  
-  // 3. Start time-based rabbit system
-  rabbit_start_time = millis();
-  rabbit_active = true;
-  current_path_index = 0;
-  
-  // 4. Initialize aircraft state from current MSP data
-  convertMSPStateToAircraftState(aircraft_state);
-  
-  logPrint(INFO, "Rabbit started at velocity %.1f m/s", SIM_RABBIT_VELOCITY);
 }
 
 // Convert MSP state data to AircraftState for GP evaluator
-void convertMSPStateToAircraftState(AircraftState& aircraftState) {
+void convertMSPStateToAircraftState(AircraftState &aircraftState)
+{
+
   // Use MSP data that was already collected in mspUpdateState()
-  if (!state.attitude_quaternion_valid || !state.raw_gps_valid) {
+  if (!state.attitude_quaternion_valid)
+  {
     return;
   }
-  
+
   // Convert MSP quaternion to Eigen quaternion
   Eigen::Quaterniond orientation(
-    state.attitude_quaternion.q[0],  // w
-    state.attitude_quaternion.q[1],  // x
-    state.attitude_quaternion.q[2],  // y
-    state.attitude_quaternion.q[3]   // z
+      state.attitude_quaternion.q[0], // w
+      state.attitude_quaternion.q[1], // x
+      state.attitude_quaternion.q[2], // y
+      state.attitude_quaternion.q[3]  // z
   );
+
+  // Calculate position in NED coordinates using relative offset from initial waypoint
+  Eigen::Vector3d position;
   
-  // Convert GPS position to NED coordinates relative to origin (arm point)
-  Eigen::Vector3d position(
-    0.0,  // North - use relative positioning from arm point
-    0.0,  // East
-    SIM_INITIAL_ALTITUDE  // Down (negative altitude)
-  );
-  
-  // Estimate velocity from GPS ground speed and course
-  Eigen::Vector3d velocity(
-    state.raw_gps.groundSpeed * cos(state.raw_gps.groundCourse * M_PI / 180.0) / 100.0,
-    state.raw_gps.groundSpeed * sin(state.raw_gps.groundCourse * M_PI / 180.0) / 100.0,
-    0.0
-  );
-  
-  // Update the AircraftState with current sensor data
+  if (state.waypoint_valid && initial_waypoint_cached)
+  {
+    // Convert initial and current positions to degrees
+    double initial_lat_deg = initial_lat / 1.0e7;
+    double initial_lon_deg = initial_lon / 1.0e7;
+    double current_lat_deg = state.waypoint.lat / 1.0e7;
+    double current_lon_deg = state.waypoint.lon / 1.0e7;
+
+    // GPS to NED conversion relative to initial position
+    double north = (current_lat_deg - initial_lat_deg) * 111320.0; // degrees to meters
+    double east = (current_lon_deg - initial_lon_deg) * 111320.0 * cos(initial_lat_deg * M_PI / 180.0);
+
+    // Use altitude data relative to initial altitude 
+    double current_altitude_m = state.waypoint.alt / 100.0; // cm to meters
+    double initial_altitude_m = initial_alt / 100.0; // cm to meters
+    double down = initial_altitude_m - current_altitude_m; // NED down relative to initial position
+
+    position = Eigen::Vector3d(north, east, down);
+    last_valid_position = position;
+    have_valid_position = true;
+  }
+  else
+  {
+    // Coast with previous position if we have one, otherwise use origin
+    if (have_valid_position)
+    {
+      position = last_valid_position;
+    }
+    else
+    {
+      position = Eigen::Vector3d(0.0, 0.0, 0.0);
+    }
+  }
+
+  // Calculate velocity vector from position differentials
+  Eigen::Vector3d velocity;
+
+  if (prev_time > 0 && prev_position_valid)
+  {
+    double dt = (state.asOfMsec - prev_time) / 1000.0; // ms to seconds
+    if (dt > 0)
+    {
+      // Calculate velocity as position differential
+      velocity = (position - prev_position) / dt;
+    }
+    else
+    {
+      velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+    }
+  }
+  else
+  {
+    velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+  }
+
+  // Update previous state for next calculation
+  prev_position = position;
+  prev_position_valid = true;
+  prev_time = state.asOfMsec;
+
+  // Calculate speed magnitude for getRelVel() - mostly vertical velocity
+  double speed_magnitude = velocity.norm();
+
+  // Update the AircraftState with current sensor data (all in correct units: meters, m/s)
   aircraftState.setPosition(position);
   aircraftState.setOrientation(orientation);
   aircraftState.setVelocity(velocity);
-  aircraftState.setSimTimeMsec(state.asOfMsec);  // Use MSP timestamp
-  aircraftState.setThisPathIndex(current_path_index);
+  aircraftState.setRelVel(speed_magnitude);
+  aircraftState.setSimTimeMsec(state.asOfMsec);
+
 }
 
 // Find path index based on elapsed time since autoc enabled
-int getRabbitPathIndex(unsigned long elapsed_msec) {
-  if (flight_path.empty()) return 0;
-  
+int getRabbitPathIndex(unsigned long elapsed_msec)
+{
+  if (flight_path.empty())
+    return 0;
+
   // Linear scan from current point to find the path segment just beyond where we are in time
   // Since time only moves forward, start from the current index to avoid redundant searches
-  for (size_t i = current_path_index; i < flight_path.size(); i++) {
-    if (flight_path[i].simTimeMsec >= elapsed_msec) {
+  for (size_t i = current_path_index; i < flight_path.size(); i++)
+  {
+    if (flight_path[i].simTimeMsec >= elapsed_msec)
+    {
       return (int)i;
     }
   }
-  
+
   // If elapsed time has gone beyond the path, return last segment
   return (int)(flight_path.size() - 1);
 }
 
 // MSP channel conversion functions with correct polarity
-int convertRollToMSPChannel(double gp_command) {
-    // Roll: GP +1.0 = roll right = MSP 2000 (DIRECT mapping)
-    double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
-    return (int)(1500.0 + clamped * 500.0);
+int convertRollToMSPChannel(double gp_command)
+{
+  // Roll: GP +1.0 = roll right = MSP 2000 (DIRECT mapping)
+  double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
+  return (int)(1500.0 + clamped * 500.0);
 }
 
-int convertPitchToMSPChannel(double gp_command) {
-    // Pitch: GP +1.0 = pitch up = MSP 1000 (INVERTED mapping to match CRRCSim)
-    double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
-    return (int)(1500.0 - clamped * 500.0);
+int convertPitchToMSPChannel(double gp_command)
+{
+  // Pitch: GP +1.0 = pitch up = MSP 1000 (INVERTED mapping to match CRRCSim)
+  double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
+  return (int)(1500.0 - clamped * 500.0);
 }
 
-int convertThrottleToMSPChannel(double gp_command) {
-    // Throttle: GP +1.0 = full throttle = MSP 2000 (DIRECT mapping)
-    double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
-    return (int)(1500.0 + clamped * 500.0);
+int convertThrottleToMSPChannel(double gp_command)
+{
+  // Throttle: GP +1.0 = full throttle = MSP 2000 (DIRECT mapping)
+  double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
+  return (int)(1500.0 + clamped * 500.0);
 }

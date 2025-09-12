@@ -66,18 +66,47 @@ void logGPState()
     }
   }
   
-  // Get attitude data if available
+  // Get attitude data if available using INAV's exact conversion method
   String att_str = "-";
   if (state.attitude_quaternion_valid)
   {
-    Eigen::Quaterniond orientation(
-        state.attitude_quaternion.q[0], // w
-        state.attitude_quaternion.q[1], // x
-        state.attitude_quaternion.q[2], // y
-        state.attitude_quaternion.q[3]  // z
-    );
-    Eigen::Vector3d euler = orientation.toRotationMatrix().eulerAngles(2, 1, 0); // ZYX order (yaw, pitch, roll)
-    att_str = String("[") + String(euler[2] * 180.0/M_PI, 1) + "," + String(euler[1] * 180.0/M_PI, 1) + "," + String(euler[0] * 180.0/M_PI, 1) + "]";
+    // Use INAV's quaternion element names: q0=w, q1=x, q2=y, q3=z
+    float q0 = state.attitude_quaternion.q[0]; // w
+    float q1 = state.attitude_quaternion.q[1]; // x  
+    float q2 = state.attitude_quaternion.q[2]; // y
+    float q3 = state.attitude_quaternion.q[3]; // z
+    
+    // Compute rotation matrix exactly like INAV
+    float q1q1 = q1 * q1;
+    float q2q2 = q2 * q2;
+    float q3q3 = q3 * q3;
+    float q0q1 = q0 * q1;
+    float q0q2 = q0 * q2;
+    float q0q3 = q0 * q3;
+    float q1q2 = q1 * q2;
+    float q1q3 = q1 * q3;
+    float q2q3 = q2 * q3;
+    
+    float rMat[3][3];
+    rMat[0][0] = 1.0f - 2.0f * q2q2 - 2.0f * q3q3;
+    rMat[0][1] = 2.0f * (q1q2 + -q0q3);
+    rMat[0][2] = 2.0f * (q1q3 - -q0q2);
+    rMat[1][0] = 2.0f * (q1q2 - -q0q3);
+    rMat[1][1] = 1.0f - 2.0f * q1q1 - 2.0f * q3q3;
+    rMat[1][2] = 2.0f * (q2q3 + -q0q1);
+    rMat[2][0] = 2.0f * (q1q3 + -q0q2);
+    rMat[2][1] = 2.0f * (q2q3 - -q0q1);
+    rMat[2][2] = 1.0f - 2.0f * q1q1 - 2.0f * q2q2;
+    
+    // Compute Euler angles exactly like INAV (in decidegrees, convert to degrees)
+    float roll_deg = atan2f(rMat[2][1], rMat[2][2]) * 180.0f / M_PI;
+    float pitch_deg = (0.5f * M_PI - acosf(-rMat[2][0])) * 180.0f / M_PI;
+    float yaw_deg = -atan2f(rMat[1][0], rMat[0][0]) * 180.0f / M_PI;
+    
+    // Handle yaw wraparound like INAV
+    if (yaw_deg < 0) yaw_deg += 360.0f;
+    
+    att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
   }
   
   // Get state flags and RC channels
@@ -168,6 +197,29 @@ static void mspUpdateGPControl()
 
     // Call generated GP program directly (aircraft_state is updated continuously in mspUpdateState)
     SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
+    
+    // DEBUG: Manual GETDTHETA and GETDPHI evaluation with coordinate details
+    double debug_args[1] = {0.0}; // offset arg = 0
+    double debug_distance = (gp_path_segment.start - aircraft_state.getPosition()).norm();
+    
+    // Calculate craft-to-target vector in world frame
+    Eigen::Vector3d craftToTarget = gp_path_segment.start - aircraft_state.getPosition();
+    // Transform to body frame
+    Eigen::Vector3d target_local = aircraft_state.getOrientation().inverse() * craftToTarget;
+    
+    double debug_getdtheta = evaluateGPOperator(10, pathProvider, aircraft_state, debug_args, 1, 0.0);  // GETDTHETA opcode = 10
+    double debug_getdphi = evaluateGPOperator(9, pathProvider, aircraft_state, debug_args, 1, 0.0);     // GETDPHI opcode = 9
+    
+    logPrint(DEBUG, "DEBUG ATTITUDE: world_vec=[%.1f,%.1f,%.1f] body_vec=[%.1f,%.1f,%.1f] theta=%.3f phi=%.3f", 
+             craftToTarget.x(), craftToTarget.y(), craftToTarget.z(),
+             target_local.x(), target_local.y(), target_local.z(),
+             debug_getdtheta, debug_getdphi);
+    
+    // DEBUG: Check if path is advancing and distance increasing
+    logPrint(DEBUG, "DEBUG RABBIT: idx=%d, elapsed=%lums, target_y=%.1f, craft_y=%.1f, dist=%.1f", 
+             current_path_index, elapsed_msec, gp_path_segment.start.y(), 
+             aircraft_state.getPosition().y(), debug_distance);
+    
     double gp_output = generatedGPProgram(pathProvider, aircraft_state, 0.0);
 
     // Convert GP-controlled aircraft commands to MSP RC values and cache them
@@ -335,12 +387,14 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     return;
   }
 
-  // Convert MSP quaternion to Eigen quaternion
+  // Convert MSP quaternion to Eigen quaternion (adjusted for CRRCsim coordinate system)
+  // INAV uses NED frame, but CRRCsim (where GP was trained) may use different conventions
+  // Try adjusting quaternion to match CRRCsim's expected body frame
   Eigen::Quaterniond orientation(
-      state.attitude_quaternion.q[0], // w
-      state.attitude_quaternion.q[1], // x
-      state.attitude_quaternion.q[2], // y
-      state.attitude_quaternion.q[3]  // z
+      state.attitude_quaternion.q[0],  // w (q0) - keep same
+      -state.attitude_quaternion.q[1], // x (q1) - negate for different body frame  
+      state.attitude_quaternion.q[2],  // y (q2) - keep same
+      state.attitude_quaternion.q[3]   // z (q3) - keep same
   );
 
   // Calculate position in NED coordinates using relative offset from initial waypoint
@@ -358,10 +412,11 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     double north = (current_lat_deg - initial_lat_deg) * 111320.0; // degrees to meters
     double east = (current_lon_deg - initial_lon_deg) * 111320.0 * cos(initial_lat_deg * M_PI / 180.0);
 
-    // Use altitude data relative to initial altitude 
-    double current_altitude_m = state.waypoint.alt / 100.0; // cm to meters
+    // Use altitude data with offset so initial position appears at SIM_INITIAL_ALTITUDE
+    double current_altitude_m = state.waypoint.alt / 100.0; // cm to meters  
     double initial_altitude_m = initial_alt / 100.0; // cm to meters
-    double down = initial_altitude_m - current_altitude_m; // NED down relative to initial position
+    double altitude_change = current_altitude_m - initial_altitude_m; // positive when aircraft climbs
+    double down = SIM_INITIAL_ALTITUDE - altitude_change; // NED down: initial pos = SIM_INITIAL_ALTITUDE
 
     position = Eigen::Vector3d(north, east, down);
     last_valid_position = position;

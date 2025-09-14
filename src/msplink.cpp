@@ -209,11 +209,13 @@ static void mspUpdateGPControl()
     
     double debug_getdtheta = evaluateGPOperator(10, pathProvider, aircraft_state, debug_args, 1, 0.0);  // GETDTHETA opcode = 10
     double debug_getdphi = evaluateGPOperator(9, pathProvider, aircraft_state, debug_args, 1, 0.0);     // GETDPHI opcode = 9
+    double debug_getalpha = evaluateGPOperator(18, pathProvider, aircraft_state, debug_args, 1, 0.0);   // GETALPHA opcode = 18
+    double debug_getdtarget = evaluateGPOperator(11, pathProvider, aircraft_state, debug_args, 1, 0.0); // GETDTARGET opcode = 11
     
-    logPrint(DEBUG, "DEBUG ATTITUDE: world_vec=[%.1f,%.1f,%.1f] body_vec=[%.1f,%.1f,%.1f] theta=%.3f phi=%.3f", 
+    logPrint(DEBUG, "DEBUG GP: world_vec=[%.1f,%.1f,%.1f] body_vec=[%.1f,%.1f,%.1f] theta=%.3f phi=%.3f alpha=%.3f dtarget=%.3f", 
              craftToTarget.x(), craftToTarget.y(), craftToTarget.z(),
              target_local.x(), target_local.y(), target_local.z(),
-             debug_getdtheta, debug_getdphi);
+             debug_getdtheta, debug_getdphi, debug_getalpha, debug_getdtarget);
     
     // DEBUG: Check if path is advancing and distance increasing
     logPrint(DEBUG, "DEBUG RABBIT: idx=%d, elapsed=%lums, target_y=%.1f, craft_y=%.1f, dist=%.1f", 
@@ -364,12 +366,12 @@ void mspUpdateState()
 
 void mspSetControls()
 {
-  // Send cached commands every 50ms to prevent INAV timeout
-  if (millis() - lastSendTime >= MSP_SEND_INTERVAL_MSEC)
+  // Only send GP commands when rabbit is active - otherwise let user have control
+  if (rabbit_active && millis() - lastSendTime >= MSP_SEND_INTERVAL_MSEC)
   {
     lastSendTime = millis();
 
-    // Always send cached commands (updated by controllerUpdate when needed)
+    // Send cached GP commands
     state.command_buffer.channel[0] = cached_roll_cmd;     // Roll
     state.command_buffer.channel[1] = cached_pitch_cmd;    // Pitch
     state.command_buffer.channel[2] = cached_throttle_cmd; // Throttle
@@ -388,13 +390,11 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
   }
 
   // Convert MSP quaternion to Eigen quaternion (adjusted for CRRCsim coordinate system)
-  // INAV uses NED frame, but CRRCsim (where GP was trained) may use different conventions
-  // Try adjusting quaternion to match CRRCsim's expected body frame
   Eigen::Quaterniond orientation(
-      state.attitude_quaternion.q[0],  // w (q0) - keep same
-      -state.attitude_quaternion.q[1], // x (q1) - negate for different body frame  
-      state.attitude_quaternion.q[2],  // y (q2) - keep same
-      state.attitude_quaternion.q[3]   // z (q3) - keep same
+      state.attitude_quaternion.q[0],  // w (q0)
+      state.attitude_quaternion.q[1],  // x (q1)
+      state.attitude_quaternion.q[2],  // y (q2)
+      state.attitude_quaternion.q[3]   // z (q3)
   );
 
   // Calculate position in NED coordinates using relative offset from initial waypoint

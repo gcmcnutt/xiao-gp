@@ -402,23 +402,19 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
   
   if (state.waypoint_valid && initial_waypoint_cached)
   {
-    // Convert initial and current positions to degrees
-    double initial_lat_deg = initial_lat / 1.0e7;
-    double initial_lon_deg = initial_lon / 1.0e7;
-    double current_lat_deg = state.waypoint.lat / 1.0e7;
-    double current_lon_deg = state.waypoint.lon / 1.0e7;
+    // Compute differences from armed position in INAV units, then convert to meters
+    double lat_diff_deg = (state.waypoint.lat - initial_lat) / 1.0e7;
+    double lon_diff_deg = (state.waypoint.lon - initial_lon) / 1.0e7;
+    int32_t alt_diff_cm = state.waypoint.alt - initial_alt;
 
-    // GPS to NED conversion relative to initial position
-    double north = (current_lat_deg - initial_lat_deg) * 111320.0; // degrees to meters
-    double east = (current_lon_deg - initial_lon_deg) * 111320.0 * cos(initial_lat_deg * M_PI / 180.0);
+    // Convert to local meters (difference from armed position)
+    double north = lat_diff_deg * 111320.0; // degrees to meters
+    double east = lon_diff_deg * 111320.0 * cos(initial_lat / 1.0e7 * M_PI / 180.0);
+    double down = -alt_diff_cm / 100.0;  // NED: down positive, cm to meters
 
-    // Use altitude data with offset so initial position appears at SIM_INITIAL_ALTITUDE
-    double current_altitude_m = state.waypoint.alt / 100.0; // cm to meters  
-    double initial_altitude_m = initial_alt / 100.0; // cm to meters
-    double altitude_change = current_altitude_m - initial_altitude_m; // positive when aircraft climbs
-    double down = SIM_INITIAL_ALTITUDE - altitude_change; // NED down: initial pos = SIM_INITIAL_ALTITUDE
-
-    position = Eigen::Vector3d(north, east, down);
+    // Armed position appears at path origin (0, 0, SIM_INITIAL_ALTITUDE)
+    Eigen::Vector3d local_position(north, east, down);
+    position = local_position + Eigen::Vector3d(0.0, 0.0, SIM_INITIAL_ALTITUDE);
     last_valid_position = position;
     have_valid_position = true;
   }

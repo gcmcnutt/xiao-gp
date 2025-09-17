@@ -1,8 +1,3 @@
-- verify quaternion orientation
-- unit conversions to the GP interface
-  - orientation
-  - location
-  - velocity
 - safety checks pre-arm -- to ensure the mode flip is safe and 
   - rc failsafe
   - rc disarm

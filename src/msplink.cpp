@@ -5,7 +5,12 @@
 #include <gp_program.h>
 #include <vector>
 
+#ifdef USE_MSP_SIMULATION
+#include <MSPSim.h>
+MSPSim msp;
+#else
 MSP msp;
+#endif
 
 State state;
 
@@ -109,13 +114,9 @@ void logGPState()
     att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
   }
   
-  // Get state flags and RC channels
+  // Get state flags
   bool armed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
   bool failsafe = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_FAILSAFE);
-  int rc_ch1 = state.rc_valid ? state.rc.channelValue[0] : 0; // Roll
-  int rc_ch2 = state.rc_valid ? state.rc.channelValue[1] : 0; // Pitch
-  int rc_ch4 = state.rc_valid ? state.rc.channelValue[3] : 0; // Throttle
-  int rc_ch9 = state.rc_valid ? state.rc.channelValue[8] : 0; // Switch channel
   
   // Get quaternion data if available
   String quat_str = "-";
@@ -125,10 +126,11 @@ void logGPState()
                "," + String(state.attitude_quaternion.q[2], 3) + "," + String(state.attitude_quaternion.q[3], 3) + "]";
   }
   
-  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s autoc=%s rc=[%d,%d,%d,%d] time=%lums",
+  bool hasMSPRCOverride = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_MSPRCOVERRIDE);
+  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s msprc=%s autoc=%s time=%lums",
            pos_str.c_str(), vel_str.c_str(), att_str.c_str(), quat_str.c_str(), relvel_str.c_str(),
-           armed ? "Y" : "N", failsafe ? "Y" : "N", state.autoc_enabled ? "Y" : "N", 
-           rc_ch1, rc_ch2, rc_ch4, rc_ch9, time_val);
+           armed ? "Y" : "N", failsafe ? "Y" : "N", hasMSPRCOverride ? "Y" : "N", state.autoc_enabled ? "Y" : "N",
+           time_val);
 }
 
 static void mspUpdateGPControl()
@@ -262,20 +264,18 @@ void mspUpdateState()
     return; // Critical error - can't continue without status
   }
 
-  // get RC data
-  state.rc_valid = msp.request(MSP_RC, &state.rc, sizeof(state.rc));
 
   // attitude quaternion
   state.attitude_quaternion_valid = msp.request(MSP_ATTITUDE_QUATERNION, &state.attitude_quaternion, sizeof(state.attitude_quaternion));
+
 
   // current position waypoint (waypoint #255 = current estimated position)
   msp_wp_request_t wp_request;
   wp_request.waypointNumber = MSP_WP_CURRENT_POSITION;
 
   // Send waypoint request and receive waypoint response
-  msp.send(MSP_WP, &wp_request, sizeof(wp_request));
-  uint16_t recvSize;
-  state.waypoint_valid = msp.waitFor(MSP_WP, &state.waypoint, sizeof(state.waypoint), &recvSize);
+  state.waypoint_valid = msp.request(MSP_WP, &wp_request, sizeof(wp_request), &state.waypoint, sizeof(state.waypoint));
+
 
   // ok, let's see what we fetched and updated.
   // first, check if we have a valid status
@@ -290,7 +290,8 @@ void mspUpdateState()
   }
 
   // then, check the flight mode flags to see if can auto-enable
-  if (isArmed && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD)
+  bool hasMSPRCOverride = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_MSPRCOVERRIDE);
+  if (isArmed && hasMSPRCOverride)
   {
     state.autoc_countdown++;
   }
@@ -431,7 +432,7 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     }
   }
 
-  // Calculate velocity vector from position differentials
+  // Calculate velocity vector from position differentials (unified approach for sim and live)
   Eigen::Vector3d velocity;
 
   if (prev_time > 0 && prev_position_valid)
@@ -509,4 +510,13 @@ int convertThrottleToMSPChannel(double gp_command)
   // Throttle: GP +1.0 = full throttle = MSP 2000 (DIRECT mapping)
   double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
   return (int)(1500.0 + clamped * 500.0);
+}
+
+void mspResetTiming()
+{
+#ifdef USE_MSP_SIMULATION
+  // Reset MSP simulation timing to account for initialization delays
+  msp.reset();
+  logPrint(INFO, "MSP Simulation timing reset");
+#endif
 }

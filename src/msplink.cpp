@@ -38,11 +38,14 @@ static int32_t initial_lon = 0;
 static int32_t initial_alt = 0;
 
 // Aircraft state tracking for position/velocity calculation
-static unsigned long prev_time = 0;
 static Eigen::Vector3d last_valid_position(0.0, 0.0, 0.0);
 static bool have_valid_position = false;
-static Eigen::Vector3d prev_position(0.0, 0.0, 0.0);
-static bool prev_position_valid = false;
+
+// For raw position velocity calculation
+static Eigen::Vector3d prev_raw_position(0.0, 0.0, 0.0);
+static Eigen::Vector3d last_valid_raw_position(0.0, 0.0, 0.0);
+static bool prev_raw_position_valid = false;
+static unsigned long prev_position_timestamp = 0;
 
 // Safety timeout for single GP test run (60 seconds max per run)
 #define GP_MAX_SINGLE_RUN_MSEC (60 * 1000)
@@ -53,17 +56,19 @@ void logGPState()
   // Get position/velocity data if available
   String pos_str = "-", vel_str = "-", relvel_str = "-";
   unsigned long time_val = state.asOfMsec;
-  
+
+  // Always show velocity and position data since we now have continuous tracking
+  Eigen::Vector3d vel = aircraft_state.getVelocity();
+  Eigen::Vector3d pos = aircraft_state.getPosition();
+  double relvel = aircraft_state.getRelVel();
+
+  vel_str = String("[") + String(vel[0], 1) + "," + String(vel[1], 1) + "," + String(vel[2], 1) + "]";
+  pos_str = String("[") + String(pos[0], 1) + "," + String(pos[1], 1) + "," + String(pos[2], 1) + "]";
+  relvel_str = String(relvel, 1);
+
+  // Time data only available when test is active
   if (initial_waypoint_cached && !flight_path.empty())
   {
-    Eigen::Vector3d pos = aircraft_state.getPosition();
-    Eigen::Vector3d vel = aircraft_state.getVelocity();
-    double relvel = aircraft_state.getRelVel();
-    
-    pos_str = String("[") + String(pos[0], 1) + "," + String(pos[1], 1) + "," + String(pos[2], 1) + "]";
-    vel_str = String("[") + String(vel[0], 1) + "," + String(vel[1], 1) + "," + String(vel[2], 1) + "]";
-    relvel_str = String(relvel, 1);
-    
     if (rabbit_active) {
       time_val = state.asOfMsec - rabbit_start_time; // Relative time during test
     } else {
@@ -353,7 +358,7 @@ void mspUpdateState()
   }
 
   // Update aircraft state on every MSP cycle for continuous position/velocity tracking
-  if (initial_waypoint_cached)
+  if (state.waypoint_valid)
   {
     convertMSPStateToAircraftState(aircraft_state);
   }
@@ -398,26 +403,67 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
       state.attitude_quaternion.q[3]   // z (q3)
   );
 
-  // Calculate position in NED coordinates using relative offset from initial waypoint
+  // Calculate position relative to base position (set on first waypoint and when autoc arms)
   Eigen::Vector3d position;
-  
-  if (state.waypoint_valid && initial_waypoint_cached)
-  {
-    // Compute differences from armed position in INAV units, then convert to meters
-    double lat_diff_deg = (state.waypoint.lat - initial_lat) / 1.0e7;
-    double lon_diff_deg = (state.waypoint.lon - initial_lon) / 1.0e7;
-    int32_t alt_diff_cm = state.waypoint.alt - initial_alt;
+  Eigen::Vector3d raw_position; // Raw position for velocity calculation
+  bool got_new_position = false;
+  unsigned long position_timestamp = state.asOfMsec;
 
-    // Convert to local meters (difference from armed position)
-    double north = lat_diff_deg * 111320.0; // degrees to meters
-    double east = lon_diff_deg * 111320.0 * cos(initial_lat / 1.0e7 * M_PI / 180.0);
+  if (state.waypoint_valid)
+  {
+    // Set base position on first valid waypoint or when autoc becomes enabled
+    static bool base_position_set = false;
+    static int32_t base_lat, base_lon, base_alt;
+    static bool was_autoc_enabled = false;
+
+    // Reset base position when autoc transitions from disabled to enabled
+    if (state.autoc_enabled && !was_autoc_enabled) {
+      base_lat = state.waypoint.lat;
+      base_lon = state.waypoint.lon;
+      base_alt = state.waypoint.alt;
+      base_position_set = true;
+    }
+    // Set base position on very first waypoint
+    else if (!base_position_set) {
+      base_lat = state.waypoint.lat;
+      base_lon = state.waypoint.lon;
+      base_alt = state.waypoint.alt;
+      base_position_set = true;
+    }
+    was_autoc_enabled = state.autoc_enabled;
+
+    // Calculate absolute position from INAV waypoint data (for velocity calculation)
+    double lat_deg = state.waypoint.lat / 1.0e7;
+    double lon_deg = state.waypoint.lon / 1.0e7;
+    int32_t alt_cm = state.waypoint.alt;
+
+    // Convert INAV position to NED meters from origin
+    double north_abs = lat_deg * 111320.0;
+    double east_abs = lon_deg * 111320.0 * cos(lat_deg * M_PI / 180.0);
+    double down_abs = -alt_cm / 100.0;  // NED: down positive, cm to meters
+    raw_position = Eigen::Vector3d(north_abs, east_abs, down_abs);
+
+    // Calculate position relative to base position
+    double lat_diff_deg = (state.waypoint.lat - base_lat) / 1.0e7;
+    double lon_diff_deg = (state.waypoint.lon - base_lon) / 1.0e7;
+    int32_t alt_diff_cm = state.waypoint.alt - base_alt;
+
+    // Convert to NED meters
+    double north = lat_diff_deg * 111320.0;
+    double east = lon_diff_deg * 111320.0 * cos(base_lat / 1.0e7 * M_PI / 180.0);
     double down = -alt_diff_cm / 100.0;  // NED: down positive, cm to meters
 
-    // Armed position appears at path origin (0, 0, SIM_INITIAL_ALTITUDE)
-    Eigen::Vector3d local_position(north, east, down);
-    position = local_position + Eigen::Vector3d(0.0, 0.0, SIM_INITIAL_ALTITUDE);
+    if (state.autoc_enabled) {
+      // When autoc enabled: Add SIM_INITIAL_ALTITUDE offset for path following
+      position = Eigen::Vector3d(north, east, down + SIM_INITIAL_ALTITUDE);
+    } else {
+      // When autoc disabled: Use raw relative position
+      position = Eigen::Vector3d(north, east, down);
+    }
+
     last_valid_position = position;
     have_valid_position = true;
+    got_new_position = true;
   }
   else
   {
@@ -425,23 +471,25 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     if (have_valid_position)
     {
       position = last_valid_position;
+      raw_position = last_valid_raw_position;  // Use last known raw position
     }
     else
     {
       position = Eigen::Vector3d(0.0, 0.0, 0.0);
+      raw_position = Eigen::Vector3d(0.0, 0.0, 0.0);
     }
   }
 
-  // Calculate velocity vector from position differentials (unified approach for sim and live)
+  // Calculate velocity from INAV position differentials (0 for first sample)
   Eigen::Vector3d velocity;
 
-  if (prev_time > 0 && prev_position_valid)
+  if (got_new_position && prev_position_timestamp > 0 && prev_raw_position_valid)
   {
-    double dt = (state.asOfMsec - prev_time) / 1000.0; // ms to seconds
+    double dt = (position_timestamp - prev_position_timestamp) / 1000.0; // ms to seconds
     if (dt > 0)
     {
-      // Calculate velocity as position differential
-      velocity = (position - prev_position) / dt;
+      // Calculate velocity from INAV position differential
+      velocity = (raw_position - prev_raw_position) / dt;
     }
     else
     {
@@ -450,13 +498,17 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
   }
   else
   {
+    // First sample or no new position - velocity is 0
     velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
   }
 
-  // Update previous state for next calculation
-  prev_position = position;
-  prev_position_valid = true;
-  prev_time = state.asOfMsec;
+  // Update previous state for next calculation (only when we get new position data)
+  if (got_new_position) {
+    prev_raw_position = raw_position;
+    last_valid_raw_position = raw_position;
+    prev_raw_position_valid = true;
+    prev_position_timestamp = position_timestamp;
+  }
 
   // Calculate speed magnitude for getRelVel() - mostly vertical velocity
   double speed_magnitude = velocity.norm();

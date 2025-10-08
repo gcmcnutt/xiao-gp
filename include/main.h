@@ -23,6 +23,8 @@ struct AircraftState;
 #define MSP_LOS_INTERVAL_MSEC 2000
 
 #define MSP_DEFAULT_CHANNEL_VALUE 1500
+#define MSP_ARM_CHANNEL 8
+#define MSP_ARMED_THRESHOLD 1600
 #define MSP_ARM_CYCLE_COUNT 2
 
 // MSP flight mode flags

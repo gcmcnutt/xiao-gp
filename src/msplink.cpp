@@ -82,7 +82,7 @@ void logGPState()
   {
     // Use INAV's quaternion element names: q0=w, q1=x, q2=y, q3=z
     float q0 = state.attitude_quaternion.q[0]; // w
-    float q1 = state.attitude_quaternion.q[1]; // x  
+    float q1 = state.attitude_quaternion.q[1]; // x
     float q2 = state.attitude_quaternion.q[2]; // y
     float q3 = state.attitude_quaternion.q[3]; // z
     
@@ -99,29 +99,31 @@ void logGPState()
     
     float rMat[3][3];
     rMat[0][0] = 1.0f - 2.0f * q2q2 - 2.0f * q3q3;
-    rMat[0][1] = 2.0f * (q1q2 + -q0q3);
-    rMat[0][2] = 2.0f * (q1q3 - -q0q2);
-    rMat[1][0] = 2.0f * (q1q2 - -q0q3);
+    rMat[0][1] = 2.0f * (q1q2 - q0q3);
+    rMat[0][2] = 2.0f * (q1q3 + q0q2);
+    rMat[1][0] = 2.0f * (q1q2 + q0q3);
     rMat[1][1] = 1.0f - 2.0f * q1q1 - 2.0f * q3q3;
-    rMat[1][2] = 2.0f * (q2q3 + -q0q1);
-    rMat[2][0] = 2.0f * (q1q3 + -q0q2);
-    rMat[2][1] = 2.0f * (q2q3 - -q0q1);
+    rMat[1][2] = 2.0f * (q2q3 - q0q1);
+    rMat[2][0] = 2.0f * (q1q3 - q0q2);
+    rMat[2][1] = 2.0f * (q2q3 + q0q1);
     rMat[2][2] = 1.0f - 2.0f * q1q1 - 2.0f * q2q2;
     
-    // Compute Euler angles exactly like INAV (in decidegrees, convert to degrees)
+    // Compute Euler angles like INAV but flip pitch to match GP convention
     float roll_deg = atan2f(rMat[2][1], rMat[2][2]) * 180.0f / M_PI;
-    float pitch_deg = (0.5f * M_PI - acosf(-rMat[2][0])) * 180.0f / M_PI;
+    float pitch_deg = -((0.5f * M_PI - acosf(-rMat[2][0])) * 180.0f / M_PI);  // FLIPPED for GP convention
     float yaw_deg = -atan2f(rMat[1][0], rMat[0][0]) * 180.0f / M_PI;
     
     // Handle yaw wraparound like INAV
     if (yaw_deg < 0) yaw_deg += 360.0f;
     
+    // Attitude logging format: [roll, pitch, yaw] in degrees
+    // Roll: + = right, Pitch: + = up, Yaw: + = clockwise from north
     att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
   }
   
   // Get state flags
-  bool armed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
-  bool failsafe = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_FAILSAFE);
+  bool armed = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_ARM);
+  bool failsafe = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_FAILSAFE);
   
   // Get quaternion data if available
   String quat_str = "-";
@@ -131,11 +133,51 @@ void logGPState()
                "," + String(state.attitude_quaternion.q[2], 3) + "," + String(state.attitude_quaternion.q[3], 3) + "]";
   }
   
-  bool hasMSPRCOverride = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_MSPRCOVERRIDE);
-  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s msprc=%s autoc=%s time=%lums",
+  bool hasServoActivation = state.rc_valid && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD;
+
+  // Command correlation analysis (only during simulation when autoc is enabled)
+  String corr_str = "-";
+#ifdef USE_MSP_SIMULATION
+  if (state.autoc_enabled && rabbit_active) {
+    // Get current GP commands
+    uint16_t gp_cmd[3] = {
+      (uint16_t)cached_roll_cmd,
+      (uint16_t)cached_pitch_cmd,
+      (uint16_t)cached_throttle_cmd
+    };
+
+    // Search for correlation in MSP simulation data
+    extern MSPSim msp; // Access the MSP simulation instance
+    int correlation_offset = msp.findCommandCorrelation(gp_cmd, 10, 50.0f);
+
+    if (correlation_offset >= 0) {
+      uint16_t match_cmd[3];
+      size_t current_frame = msp.getCurrentFrameIndex();
+      if (msp.getFrameCommands(current_frame + correlation_offset, match_cmd)) {
+        corr_str = String("f") + String(current_frame) + "+";
+        corr_str += String(correlation_offset) + "=[";
+        corr_str += String(match_cmd[0]) + "," + String(match_cmd[1]) + "," + String(match_cmd[2]) + "]";
+
+        // Add sampling offset info if available
+        if (msp.hasSamplingOffset()) {
+          corr_str += String(" off=") + String(msp.getSamplingOffset() / 1000.0f, 1) + "ms";
+        }
+      }
+    } else {
+      corr_str = String("f") + String(msp.getCurrentFrameIndex()) + " no_match";
+
+      // Add sampling offset info even if no correlation found
+      if (msp.hasSamplingOffset()) {
+        corr_str += String(" off=") + String(msp.getSamplingOffset() / 1000.0f, 1) + "ms";
+      }
+    }
+  }
+#endif
+
+  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s servo=%s autoc=%s corr=%s time=%lums",
            pos_str.c_str(), vel_str.c_str(), att_str.c_str(), quat_str.c_str(), relvel_str.c_str(),
-           armed ? "Y" : "N", failsafe ? "Y" : "N", hasMSPRCOverride ? "Y" : "N", state.autoc_enabled ? "Y" : "N",
-           time_val);
+           armed ? "Y" : "N", failsafe ? "Y" : "N", hasServoActivation ? "Y" : "N", state.autoc_enabled ? "Y" : "N",
+           corr_str.c_str(), time_val);
 }
 
 static void mspUpdateGPControl()
@@ -144,8 +186,8 @@ static void mspUpdateGPControl()
   // Only check if we're currently enabled to avoid repeat logging
   if (state.autoc_enabled && rabbit_active)
   {
-    bool isArmed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
-    bool isFailsafe = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_FAILSAFE);
+    bool isArmed = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_ARM);
+    bool isFailsafe = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_FAILSAFE);
 
     if (!isArmed || isFailsafe)
     {
@@ -236,7 +278,7 @@ static void mspUpdateGPControl()
     cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
     cached_throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
 
-    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d cmd=[%d,%d,%d] out=%.3f time=%lums",
+    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d setRcData=[%d,%d,%d] out=%.3f time=%lums",
              gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
              current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, gp_output, elapsed_msec);
   }
@@ -273,6 +315,9 @@ void mspUpdateState()
   // attitude quaternion
   state.attitude_quaternion_valid = msp.request(MSP_ATTITUDE_QUATERNION, &state.attitude_quaternion, sizeof(state.attitude_quaternion));
 
+  // RC channels
+  state.rc_valid = msp.request(MSP_RC, &state.rc, sizeof(state.rc));
+
 
   // current position waypoint (waypoint #255 = current estimated position)
   msp_wp_request_t wp_request;
@@ -294,9 +339,11 @@ void mspUpdateState()
     analogWrite(BLUE_PIN, 255);
   }
 
-  // then, check the flight mode flags to see if can auto-enable
-  bool hasMSPRCOverride = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_MSPRCOVERRIDE);
-  if (isArmed && hasMSPRCOverride)
+  // then, check the servo channel to see if can auto-enable
+  bool hasServoActivation = state.rc_valid && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD;
+
+
+  if (isArmed && hasServoActivation)
   {
     state.autoc_countdown++;
   }
@@ -396,11 +443,13 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
   }
 
   // Convert MSP quaternion to Eigen quaternion (adjusted for CRRCsim coordinate system)
+  // TEST: Flip pitch sign to align INAV "pitch up = negative" with GP "pitch up = positive"
+  // Negating q2 (Y component) flips pitch direction
   Eigen::Quaterniond orientation(
-      state.attitude_quaternion.q[0],  // w (q0)
-      state.attitude_quaternion.q[1],  // x (q1)
-      state.attitude_quaternion.q[2],  // y (q2)
-      state.attitude_quaternion.q[3]   // z (q3)
+      state.attitude_quaternion.q[0],   // w (q0)
+      state.attitude_quaternion.q[1],   // x (q1) - roll
+      -state.attitude_quaternion.q[2],  // y (q2) - pitch (FLIPPED)
+      state.attitude_quaternion.q[3]    // z (q3) - yaw
   );
 
   // Calculate position relative to base position (set on first waypoint and when autoc arms)
@@ -440,7 +489,7 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     // Convert INAV position to NED meters from origin
     double north_abs = lat_deg * 111320.0;
     double east_abs = lon_deg * 111320.0 * cos(lat_deg * M_PI / 180.0);
-    double down_abs = -alt_cm / 100.0;  // NED: down positive, cm to meters
+    double down_abs = -alt_cm / 100.0;  // INAV alt is up-positive, NED down-positive, so negate
     raw_position = Eigen::Vector3d(north_abs, east_abs, down_abs);
 
     // Calculate position relative to base position

@@ -31,6 +31,10 @@ private:
     uint16_t _last_gp_command[4];    // [roll, pitch, yaw, throttle]
     bool _has_gp_command;
 
+    // Sampling pattern detection
+    int32_t _sampling_offset_us;     // Offset to apply for better timing correlation
+    bool _has_sampling_offset;
+
     const FlightDataFrame* findFrameAtTime(uint32_t target_time_us);
     bool convertFrameToMSPResponse(uint16_t messageID, const FlightDataFrame* frame,
                                    void* payload, uint16_t maxSize, uint16_t* recvSize);
@@ -60,4 +64,13 @@ public:
     void getCommandLog(std::vector<std::string>& log);
     void clearCommandLog();
     size_t getCurrentFrameIndex() const;
+
+    // Command correlation analysis
+    int findCommandCorrelation(const uint16_t gp_cmd[3], int max_frames_ahead = 10, float tolerance = 50.0f);
+    bool getFrameCommands(size_t frame_index, uint16_t cmd[3]);
+
+    // Sampling pattern detection and timing offset
+    void analyzeSamplingPattern();
+    int32_t getSamplingOffset() const;
+    bool hasSamplingOffset() const;
 };

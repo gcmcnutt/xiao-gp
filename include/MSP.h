@@ -700,14 +700,15 @@ class MSP {
     
     bool request(uint16_t messageID, void * payload, uint16_t maxSize, uint16_t *recvSize = NULL);
 
+    // Overloaded request for commands with request payload (like MSP_WP)
+    bool request(uint16_t messageID, void * requestPayload, uint16_t requestSize,
+                 void * responsePayload, uint16_t maxResponseSize, uint16_t *recvSize = NULL);
+
     bool command(uint16_t messageID, void * payload, uint16_t size, bool waitACK = true);
 
     void reset();
 
     // high level functions
-    
-    bool getActiveModes(uint32_t * activeModes);
-    
 
   private:
   

@@ -4,13 +4,9 @@
 #include <GP/autoc/gp_evaluator_embedded.h>
 #include <gp_program.h>
 #include <vector>
+#include <cmath>
 
-#ifdef USE_MSP_SIMULATION
-#include <MSPSim.h>
-MSPSim msp;
-#else
 MSP msp;
-#endif
 
 State state;
 
@@ -20,10 +16,15 @@ static std::vector<Path> flight_path;
 static AircraftState aircraft_state;
 static Path gp_path_segment; // Single GP-compatible path segment for evaluator
 
+// Path anchoring
+static Eigen::Vector3d path_origin_offset(0.0, 0.0, 0.0);
+static bool path_origin_set = false;
+
 // GP Control Timing and State
 static unsigned long rabbit_start_time = 0;
 static bool rabbit_active = false;
 static int current_path_index = 0;
+static bool servo_reset_required = false;
 
 // MSP Control Output Caching
 static int cached_roll_cmd = MSP_DEFAULT_CHANNEL_VALUE;
@@ -31,24 +32,62 @@ static int cached_pitch_cmd = MSP_DEFAULT_CHANNEL_VALUE;
 static int cached_throttle_cmd = MSP_DEFAULT_CHANNEL_VALUE;
 static unsigned long lastSendTime = 0;
 
-// Initial waypoint state for relative position calculations
-static bool initial_waypoint_cached = false;
-static int32_t initial_lat = 0;
-static int32_t initial_lon = 0;
-static int32_t initial_alt = 0;
-
 // Aircraft state tracking for position/velocity calculation
 static Eigen::Vector3d last_valid_position(0.0, 0.0, 0.0);
 static bool have_valid_position = false;
 
-// For raw position velocity calculation
-static Eigen::Vector3d prev_raw_position(0.0, 0.0, 0.0);
-static Eigen::Vector3d last_valid_raw_position(0.0, 0.0, 0.0);
-static bool prev_raw_position_valid = false;
-static unsigned long prev_position_timestamp = 0;
-
 // Safety timeout for single GP test run (60 seconds max per run)
 #define GP_MAX_SINGLE_RUN_MSEC (60 * 1000)
+
+static void resetPositionHistory()
+{
+  last_valid_position = Eigen::Vector3d(0.0, 0.0, 0.0);
+  have_valid_position = false;
+}
+
+static void stopAutoc(const char *reason, bool requireServoReset)
+{
+  bool wasAutoc = state.autoc_enabled;
+  bool wasRabbit = rabbit_active;
+  bool latchBefore = servo_reset_required;
+
+  state.autoc_enabled = false;
+  rabbit_active = false;
+  path_origin_set = false;
+  path_origin_offset = Eigen::Vector3d(0.0, 0.0, 0.0);
+  state.autoc_countdown = 0;
+  resetPositionHistory();
+  analogWrite(GREEN_PIN, 255);
+
+  if (requireServoReset)
+  {
+    servo_reset_required = true;
+  }
+
+  if (wasAutoc || wasRabbit || (requireServoReset && !latchBefore))
+  {
+    logPrint(INFO, "GP Control: Autoc disabled (%s) - pilot has control", reason);
+  }
+}
+
+static Eigen::Vector3d neuVectorToNedMeters(const int32_t vec_cm[3])
+{
+  double north = static_cast<double>(vec_cm[0]) / 100.0;
+  double east = static_cast<double>(vec_cm[1]) / 100.0;
+  double down = -static_cast<double>(vec_cm[2]) / 100.0;
+  return Eigen::Vector3d(north, east, down);
+}
+
+static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
+{
+  Eigen::Quaterniond q_neu(q[0], q[1], q[2], q[3]);
+  if (q_neu.norm() == 0.0)
+  {
+    return Eigen::Quaterniond::Identity();
+  }
+  q_neu.normalize();
+  return q_neu;
+}
 
 // Unified GP State logging function
 void logGPState()
@@ -67,7 +106,7 @@ void logGPState()
   relvel_str = String(relvel, 1);
 
   // Time data only available when test is active
-  if (initial_waypoint_cached && !flight_path.empty())
+  if (!flight_path.empty())
   {
     if (rabbit_active) {
       time_val = state.asOfMsec - rabbit_start_time; // Relative time during test
@@ -76,108 +115,100 @@ void logGPState()
     }
   }
   
-  // Get attitude data if available using INAV's exact conversion method
+  // Get attitude data if available using INAV's quaternion convention (matches Configurator)
   String att_str = "-";
-  if (state.attitude_quaternion_valid)
+  String quat_str = "-";
+  if (state.local_state_valid)
   {
-    // Use INAV's quaternion element names: q0=w, q1=x, q2=y, q3=z
-    float q0 = state.attitude_quaternion.q[0]; // w
-    float q1 = state.attitude_quaternion.q[1]; // x
-    float q2 = state.attitude_quaternion.q[2]; // y
-    float q3 = state.attitude_quaternion.q[3]; // z
-    
-    // Compute rotation matrix exactly like INAV
-    float q1q1 = q1 * q1;
-    float q2q2 = q2 * q2;
-    float q3q3 = q3 * q3;
-    float q0q1 = q0 * q1;
-    float q0q2 = q0 * q2;
-    float q0q3 = q0 * q3;
-    float q1q2 = q1 * q2;
-    float q1q3 = q1 * q3;
-    float q2q3 = q2 * q3;
-    
-    float rMat[3][3];
-    rMat[0][0] = 1.0f - 2.0f * q2q2 - 2.0f * q3q3;
-    rMat[0][1] = 2.0f * (q1q2 - q0q3);
-    rMat[0][2] = 2.0f * (q1q3 + q0q2);
-    rMat[1][0] = 2.0f * (q1q2 + q0q3);
-    rMat[1][1] = 1.0f - 2.0f * q1q1 - 2.0f * q3q3;
-    rMat[1][2] = 2.0f * (q2q3 - q0q1);
-    rMat[2][0] = 2.0f * (q1q3 - q0q2);
-    rMat[2][1] = 2.0f * (q2q3 + q0q1);
-    rMat[2][2] = 1.0f - 2.0f * q1q1 - 2.0f * q2q2;
-    
-    // Compute Euler angles like INAV but flip pitch to match GP convention
-    float roll_deg = atan2f(rMat[2][1], rMat[2][2]) * 180.0f / M_PI;
-    float pitch_deg = -((0.5f * M_PI - acosf(-rMat[2][0])) * 180.0f / M_PI);  // FLIPPED for GP convention
-    float yaw_deg = -atan2f(rMat[1][0], rMat[0][0]) * 180.0f / M_PI;
-    
-    // Handle yaw wraparound like INAV
-    if (yaw_deg < 0) yaw_deg += 360.0f;
-    
-    // Attitude logging format: [roll, pitch, yaw] in degrees
-    // Roll: + = right, Pitch: + = up, Yaw: + = clockwise from north
+    double q0 = state.local_state.q[0];
+    double q1 = state.local_state.q[1];
+    double q2 = state.local_state.q[2];
+    double q3 = state.local_state.q[3];
+
+    double q1q1 = q1 * q1;
+    double q2q2 = q2 * q2;
+    double q3q3 = q3 * q3;
+    double q0q1 = q0 * q1;
+    double q0q2 = q0 * q2;
+    double q0q3 = q0 * q3;
+    double q1q2 = q1 * q2;
+    double q1q3 = q1 * q3;
+    double q2q3 = q2 * q3;
+
+    double rMat[3][3];
+    rMat[0][0] = 1.0 - 2.0 * q2q2 - 2.0 * q3q3;
+    rMat[0][1] = 2.0 * (q1q2 - q0q3);
+    rMat[0][2] = 2.0 * (q1q3 + q0q2);
+    rMat[1][0] = 2.0 * (q1q2 + q0q3);
+    rMat[1][1] = 1.0 - 2.0 * q1q1 - 2.0 * q3q3;
+    rMat[1][2] = 2.0 * (q2q3 - q0q1);
+    rMat[2][0] = 2.0 * (q1q3 - q0q2);
+    rMat[2][1] = 2.0 * (q2q3 + q0q1);
+    rMat[2][2] = 1.0 - 2.0 * q1q1 - 2.0 * q2q2;
+
+    double roll_deg = atan2(rMat[2][1], rMat[2][2]) * 180.0 / M_PI;
+    double pitch_deg = (0.5 * M_PI - acos(-rMat[2][0])) * 180.0 / M_PI;
+    double yaw_deg = -atan2(rMat[1][0], rMat[0][0]) * 180.0 / M_PI;
+
+    if (yaw_deg < 0) yaw_deg += 360.0;
+
     att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
+    quat_str = String("[") + String(q0, 3) + "," + String(q1, 3) + "," + String(q2, 3) + "," + String(q3, 3) + "]";
+  }
+  else
+  {
+    Eigen::Quaterniond orientation = aircraft_state.getOrientation();
+    if (orientation.norm() > 0.0)
+    {
+      orientation.normalize();
+      double q0 = orientation.w();
+      double q1 = orientation.x();
+      double q2 = orientation.y();
+      double q3 = orientation.z();
+
+      double q1q1 = q1 * q1;
+      double q2q2 = q2 * q2;
+      double q3q3 = q3 * q3;
+      double q0q1 = q0 * q1;
+      double q0q2 = q0 * q2;
+      double q0q3 = q0 * q3;
+      double q1q2 = q1 * q2;
+      double q1q3 = q1 * q3;
+      double q2q3 = q2 * q3;
+
+      double rMat[3][3];
+      rMat[0][0] = 1.0 - 2.0 * q2q2 - 2.0 * q3q3;
+      rMat[0][1] = 2.0 * (q1q2 - q0q3);
+      rMat[0][2] = 2.0 * (q1q3 + q0q2);
+      rMat[1][0] = 2.0 * (q1q2 + q0q3);
+      rMat[1][1] = 1.0 - 2.0 * q1q1 - 2.0 * q3q3;
+      rMat[1][2] = 2.0 * (q2q3 - q0q1);
+      rMat[2][0] = 2.0 * (q1q3 - q0q2);
+      rMat[2][1] = 2.0 * (q2q3 + q0q1);
+      rMat[2][2] = 1.0 - 2.0 * q1q1 - 2.0 * q2q2;
+
+      double roll_deg = atan2(rMat[2][1], rMat[2][2]) * 180.0 / M_PI;
+      double pitch_deg = (0.5 * M_PI - acos(-rMat[2][0])) * 180.0 / M_PI;
+      double yaw_deg = -atan2(rMat[1][0], rMat[0][0]) * 180.0 / M_PI;
+
+      if (yaw_deg < 0) yaw_deg += 360.0;
+
+      att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
+      quat_str = String("[") + String(q0, 3) + "," + String(q1, 3) + "," + String(q2, 3) + "," + String(q3, 3) + "]";
+    }
   }
   
   // Get state flags
   bool armed = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_ARM);
   bool failsafe = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_FAILSAFE);
   
-  // Get quaternion data if available
-  String quat_str = "-";
-  if (state.attitude_quaternion_valid)
-  {
-    quat_str = String("[") + String(state.attitude_quaternion.q[0], 3) + "," + String(state.attitude_quaternion.q[1], 3) + 
-               "," + String(state.attitude_quaternion.q[2], 3) + "," + String(state.attitude_quaternion.q[3], 3) + "]";
-  }
-  
   bool hasServoActivation = state.rc_valid && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD;
 
-  // Command correlation analysis (only during simulation when autoc is enabled)
-  String corr_str = "-";
-#ifdef USE_MSP_SIMULATION
-  if (state.autoc_enabled && rabbit_active) {
-    // Get current GP commands
-    uint16_t gp_cmd[3] = {
-      (uint16_t)cached_roll_cmd,
-      (uint16_t)cached_pitch_cmd,
-      (uint16_t)cached_throttle_cmd
-    };
-
-    // Search for correlation in MSP simulation data
-    extern MSPSim msp; // Access the MSP simulation instance
-    int correlation_offset = msp.findCommandCorrelation(gp_cmd, 10, 50.0f);
-
-    if (correlation_offset >= 0) {
-      uint16_t match_cmd[3];
-      size_t current_frame = msp.getCurrentFrameIndex();
-      if (msp.getFrameCommands(current_frame + correlation_offset, match_cmd)) {
-        corr_str = String("f") + String(current_frame) + "+";
-        corr_str += String(correlation_offset) + "=[";
-        corr_str += String(match_cmd[0]) + "," + String(match_cmd[1]) + "," + String(match_cmd[2]) + "]";
-
-        // Add sampling offset info if available
-        if (msp.hasSamplingOffset()) {
-          corr_str += String(" off=") + String(msp.getSamplingOffset() / 1000.0f, 1) + "ms";
-        }
-      }
-    } else {
-      corr_str = String("f") + String(msp.getCurrentFrameIndex()) + " no_match";
-
-      // Add sampling offset info even if no correlation found
-      if (msp.hasSamplingOffset()) {
-        corr_str += String(" off=") + String(msp.getSamplingOffset() / 1000.0f, 1) + "ms";
-      }
-    }
-  }
-#endif
-
-  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s servo=%s autoc=%s corr=%s time=%lums",
+  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s servo=%s autoc=%s rabbit=%s time=%lums",
            pos_str.c_str(), vel_str.c_str(), att_str.c_str(), quat_str.c_str(), relvel_str.c_str(),
            armed ? "Y" : "N", failsafe ? "Y" : "N", hasServoActivation ? "Y" : "N", state.autoc_enabled ? "Y" : "N",
-           corr_str.c_str(), time_val);
+           rabbit_active ? "Y" : "N",
+           time_val);
 }
 
 static void mspUpdateGPControl()
@@ -200,9 +231,7 @@ static void mspUpdateGPControl()
       {
         logPrint(INFO, "GP Control: Aircraft disarmed (%.1fs) - disabling autoc", test_run_duration / 1000.0);
       }
-      state.autoc_enabled = false;
-      rabbit_active = false;
-      initial_waypoint_cached = false; // Reset position reference for next test
+      stopAutoc(isFailsafe ? "failsafe" : "disarmed", true);
       return;
     }
   }
@@ -221,7 +250,7 @@ static void mspUpdateGPControl()
   if (elapsed_msec > GP_MAX_SINGLE_RUN_MSEC)
   {
     logPrint(INFO, "GP Control: Test run timeout (%.1fs) - stopping rabbit", elapsed_msec / 1000.0);
-    rabbit_active = false;
+    stopAutoc("timeout", true);
     return;
   }
 
@@ -232,7 +261,7 @@ static void mspUpdateGPControl()
   if (current_path_index >= (int)flight_path.size() - 1)
   {
     logPrint(INFO, "GP Control: End of path reached (%.1fs) - stopping rabbit", elapsed_msec / 1000.0);
-    rabbit_active = false;
+    stopAutoc("path complete", true);
     return;
   }
 
@@ -307,25 +336,25 @@ void mspUpdateState()
   state.status_valid = msp.request(MSP_STATUS, &state.status, sizeof(state.status));
   if (!state.status_valid)
   {
+    stopAutoc("MSP status failure", true);
     logPrint(ERROR, "*** CRITICAL: Failed to get MSP_STATUS - aborting MSP update cycle");
     return; // Critical error - can't continue without status
   }
 
-
-  // attitude quaternion
-  state.attitude_quaternion_valid = msp.request(MSP_ATTITUDE_QUATERNION, &state.attitude_quaternion, sizeof(state.attitude_quaternion));
+  // Local state (position / velocity / quaternion)
+  state.local_state_valid = msp.request(MSP2_INAV_LOCAL_STATE, &state.local_state, sizeof(state.local_state));
+  // Local state already provides quaternion data; if unavailable, orientation will be held from previous sample
+  if (!state.local_state_valid && (state.autoc_enabled || rabbit_active))
+  {
+    stopAutoc("MSP local state failure", true);
+  }
 
   // RC channels
   state.rc_valid = msp.request(MSP_RC, &state.rc, sizeof(state.rc));
-
-
-  // current position waypoint (waypoint #255 = current estimated position)
-  msp_wp_request_t wp_request;
-  wp_request.waypointNumber = MSP_WP_CURRENT_POSITION;
-
-  // Send waypoint request and receive waypoint response
-  state.waypoint_valid = msp.request(MSP_WP, &wp_request, sizeof(wp_request), &state.waypoint, sizeof(state.waypoint));
-
+  if (!state.rc_valid && (state.autoc_enabled || rabbit_active))
+  {
+    stopAutoc("MSP RC failure", true);
+  }
 
   // ok, let's see what we fetched and updated.
   // first, check if we have a valid status
@@ -342,8 +371,22 @@ void mspUpdateState()
   // then, check the servo channel to see if can auto-enable
   bool hasServoActivation = state.rc_valid && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD;
 
+  if (!isArmed && (state.autoc_enabled || rabbit_active))
+  {
+    stopAutoc("disarmed", true);
+  }
 
-  if (isArmed && hasServoActivation)
+  bool hadServoLatch = servo_reset_required;
+  if (!hasServoActivation)
+  {
+    if (hadServoLatch)
+    {
+      logPrint(INFO, "GP Control: Servo reset detected - autoc re-arm allowed");
+    }
+    servo_reset_required = false;
+    state.autoc_countdown = 0;
+  }
+  else if (!servo_reset_required && isArmed)
   {
     state.autoc_countdown++;
   }
@@ -358,57 +401,62 @@ void mspUpdateState()
   // Handle state transitions
   if (new_autoc_enabled && !state.autoc_enabled)
   {
-    // Rising edge: enable autoc and initialize rabbit system
-    
-    // 1. Cache initial waypoint state for relative position calculations
-    if (state.waypoint_valid)
+    resetPositionHistory();
+
+    if (state.local_state_valid)
     {
-      initial_lat = state.waypoint.lat;
-      initial_lon = state.waypoint.lon;
-      initial_alt = state.waypoint.alt;
-      initial_waypoint_cached = true;
+      path_origin_offset = neuVectorToNedMeters(state.local_state.pos);
+      path_origin_set = true;
 
-      // 2. Generate longSequential path using embedded pathgen system
-      path_generator.generatePath(40.0, 100.0, SIM_INITIAL_ALTITUDE);
+      path_generator.generatePath(40.0, 100.0, 0.0);
       path_generator.copyToVector(flight_path);
+      if (path_origin_set)
+      {
+        for (auto &segment : flight_path)
+        {
+          segment.start += path_origin_offset;
+        }
+      }
 
-      // 3. Start time-based rabbit system
       rabbit_start_time = millis();
       rabbit_active = true;
       current_path_index = 0;
 
-      // Enable autoc and indicate success
       state.autoc_enabled = true;
+      servo_reset_required = false;
       analogWrite(GREEN_PIN, 0);
-      logPrint(INFO, "GP Control: Switch enabled - cached waypoint lat=%d, lon=%d, alt=%d - starting flight test", initial_lat, initial_lon, initial_alt);
+      logPrint(INFO, "GP Control: Switch enabled - path origin NED=[%.2f, %.2f, %.2f] - starting flight test",
+               path_origin_offset.x(), path_origin_offset.y(), path_origin_offset.z());
     }
     else
     {
-      // Fatal error - cannot start GP control without valid waypoint data
-      initial_waypoint_cached = false;
-      logPrint(ERROR, "*** FATAL: No valid waypoint data available for GP control - cannot enable autoc");
-      // Do not enable autoc_enabled or change LED state
+      stopAutoc("missing local state", true);
+      logPrint(ERROR, "*** FATAL: No valid local state available for GP control - cannot enable autoc");
     }
   }
   else if (!new_autoc_enabled && state.autoc_enabled)
   {
-    // Falling edge: disable autoc and stop rabbit system
-    state.autoc_enabled = false;
-    analogWrite(GREEN_PIN, 255);
     if (rabbit_active)
     {
       unsigned long test_run_duration = millis() - rabbit_start_time;
       logPrint(INFO, "GP Control: Switch disabled (%.1fs) - stopping test run", test_run_duration / 1000.0);
     }
-    rabbit_active = false;
-    initial_waypoint_cached = false; // Reset cached state
+    if (!isArmed)
+    {
+      stopAutoc("disarmed", true);
+    }
+    else if (!hasServoActivation)
+    {
+      stopAutoc("servo switch", false);
+    }
+    else
+    {
+      stopAutoc("autoc cancelled", true);
+    }
   }
 
   // Update aircraft state on every MSP cycle for continuous position/velocity tracking
-  if (state.waypoint_valid)
-  {
-    convertMSPStateToAircraftState(aircraft_state);
-  }
+  convertMSPStateToAircraftState(aircraft_state);
 
   // Update GP control and cache commands when enabled
   mspUpdateGPControl();
@@ -435,140 +483,36 @@ void mspSetControls()
 // Convert MSP state data to AircraftState for GP evaluator
 void convertMSPStateToAircraftState(AircraftState &aircraftState)
 {
-
-  // Use MSP data that was already collected in mspUpdateState()
-  if (!state.attitude_quaternion_valid)
+  if (!state.local_state_valid)
   {
-    return;
+    if (!have_valid_position)
+    {
+      return;
+    }
   }
 
-  // Convert MSP quaternion to Eigen quaternion (adjusted for CRRCsim coordinate system)
-  // TEST: Flip pitch sign to align INAV "pitch up = negative" with GP "pitch up = positive"
-  // Negating q2 (Y component) flips pitch direction
-  Eigen::Quaterniond orientation(
-      state.attitude_quaternion.q[0],   // w (q0)
-      state.attitude_quaternion.q[1],   // x (q1) - roll
-      -state.attitude_quaternion.q[2],  // y (q2) - pitch (FLIPPED)
-      state.attitude_quaternion.q[3]    // z (q3) - yaw
-  );
+  Eigen::Vector3d position = have_valid_position ? last_valid_position : Eigen::Vector3d(0.0, 0.0, 0.0);
+  Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+  Eigen::Quaterniond orientation = aircraftState.getOrientation();
 
-  // Calculate position relative to base position (set on first waypoint and when autoc arms)
-  Eigen::Vector3d position;
-  Eigen::Vector3d raw_position; // Raw position for velocity calculation
-  bool got_new_position = false;
-  unsigned long position_timestamp = state.asOfMsec;
-
-  if (state.waypoint_valid)
+  if (state.local_state_valid)
   {
-    // Set base position on first valid waypoint or when autoc becomes enabled
-    static bool base_position_set = false;
-    static int32_t base_lat, base_lon, base_alt;
-    static bool was_autoc_enabled = false;
-
-    // Reset base position when autoc transitions from disabled to enabled
-    if (state.autoc_enabled && !was_autoc_enabled) {
-      base_lat = state.waypoint.lat;
-      base_lon = state.waypoint.lon;
-      base_alt = state.waypoint.alt;
-      base_position_set = true;
-    }
-    // Set base position on very first waypoint
-    else if (!base_position_set) {
-      base_lat = state.waypoint.lat;
-      base_lon = state.waypoint.lon;
-      base_alt = state.waypoint.alt;
-      base_position_set = true;
-    }
-    was_autoc_enabled = state.autoc_enabled;
-
-    // Calculate absolute position from INAV waypoint data (for velocity calculation)
-    double lat_deg = state.waypoint.lat / 1.0e7;
-    double lon_deg = state.waypoint.lon / 1.0e7;
-    int32_t alt_cm = state.waypoint.alt;
-
-    // Convert INAV position to NED meters from origin
-    double north_abs = lat_deg * 111320.0;
-    double east_abs = lon_deg * 111320.0 * cos(lat_deg * M_PI / 180.0);
-    double down_abs = -alt_cm / 100.0;  // INAV alt is up-positive, NED down-positive, so negate
-    raw_position = Eigen::Vector3d(north_abs, east_abs, down_abs);
-
-    // Calculate position relative to base position
-    double lat_diff_deg = (state.waypoint.lat - base_lat) / 1.0e7;
-    double lon_diff_deg = (state.waypoint.lon - base_lon) / 1.0e7;
-    int32_t alt_diff_cm = state.waypoint.alt - base_alt;
-
-    // Convert to NED meters
-    double north = lat_diff_deg * 111320.0;
-    double east = lon_diff_deg * 111320.0 * cos(base_lat / 1.0e7 * M_PI / 180.0);
-    double down = -alt_diff_cm / 100.0;  // NED: down positive, cm to meters
-
-    if (state.autoc_enabled) {
-      // When autoc enabled: Add SIM_INITIAL_ALTITUDE offset for path following
-      position = Eigen::Vector3d(north, east, down + SIM_INITIAL_ALTITUDE);
-    } else {
-      // When autoc disabled: Use raw relative position
-      position = Eigen::Vector3d(north, east, down);
-    }
+    position = neuVectorToNedMeters(state.local_state.pos);
+    velocity = neuVectorToNedMeters(state.local_state.vel);
+    orientation = neuQuaternionToNed(state.local_state.q);
 
     last_valid_position = position;
     have_valid_position = true;
-    got_new_position = true;
   }
-  else
-  {
-    // Coast with previous position if we have one, otherwise use origin
-    if (have_valid_position)
-    {
-      position = last_valid_position;
-      raw_position = last_valid_raw_position;  // Use last known raw position
-    }
-    else
-    {
-      position = Eigen::Vector3d(0.0, 0.0, 0.0);
-      raw_position = Eigen::Vector3d(0.0, 0.0, 0.0);
-    }
-  }
+  // If no new quaternion data, retain previous orientation from aircraft state
 
-  // Calculate velocity from INAV position differentials (0 for first sample)
-  Eigen::Vector3d velocity;
-
-  if (got_new_position && prev_position_timestamp > 0 && prev_raw_position_valid)
-  {
-    double dt = (position_timestamp - prev_position_timestamp) / 1000.0; // ms to seconds
-    if (dt > 0)
-    {
-      // Calculate velocity from INAV position differential
-      velocity = (raw_position - prev_raw_position) / dt;
-    }
-    else
-    {
-      velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
-    }
-  }
-  else
-  {
-    // First sample or no new position - velocity is 0
-    velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
-  }
-
-  // Update previous state for next calculation (only when we get new position data)
-  if (got_new_position) {
-    prev_raw_position = raw_position;
-    last_valid_raw_position = raw_position;
-    prev_raw_position_valid = true;
-    prev_position_timestamp = position_timestamp;
-  }
-
-  // Calculate speed magnitude for getRelVel() - mostly vertical velocity
   double speed_magnitude = velocity.norm();
 
-  // Update the AircraftState with current sensor data (all in correct units: meters, m/s)
   aircraftState.setPosition(position);
   aircraftState.setOrientation(orientation);
   aircraftState.setVelocity(velocity);
   aircraftState.setRelVel(speed_magnitude);
   aircraftState.setSimTimeMsec(state.asOfMsec);
-
 }
 
 // Find path index based on elapsed time since autoc enabled
@@ -611,13 +555,4 @@ int convertThrottleToMSPChannel(double gp_command)
   // Throttle: GP +1.0 = full throttle = MSP 2000 (DIRECT mapping)
   double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
   return (int)(1500.0 + clamped * 500.0);
-}
-
-void mspResetTiming()
-{
-#ifdef USE_MSP_SIMULATION
-  // Reset MSP simulation timing to account for initialization delays
-  msp.reset();
-  logPrint(INFO, "MSP Simulation timing reset");
-#endif
 }

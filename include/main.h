@@ -47,7 +47,6 @@ void setLogLevel(LogLevel level);
 // interfaces
 void msplinkSetup();
 void mspUpdateState();
-void mspResetTiming(); // Reset MSP simulation timing
 void controllerSetup();
 void controllerUpdate();
 void mspSetControls();

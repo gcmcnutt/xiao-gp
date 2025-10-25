@@ -55,7 +55,7 @@
 #define MSP_SERVO_CONFIGURATIONS 120
 #define MSP_NAV_STATUS           121 // navigation status
 #define MSP_SENSOR_ALIGNMENT     126 // orientation of acc,gyro,mag
-#define MSP_ATTITUDE_QUATERNION  131
+#define MSP2_INAV_LOCAL_STATE    0x210E
 #define MSP_STATUS_EX            150
 #define MSP_SENSOR_STATUS        151
 #define MSP_BOXIDS               119
@@ -257,9 +257,11 @@ struct msp_attitude_t {
   int16_t yaw;
 } __attribute__ ((packed));
 
-// MSP_ATTITUDE_QUATERNION reply
-struct msp_attitude_quaternion_t {
-  float q[4]; // q0, q1, q2, q3
+// MSP2_INAV_LOCAL_STATE reply
+struct msp_local_state_t {
+  int32_t pos[3]; // cm in NEU frame
+  int32_t vel[3]; // cm/s in NEU frame
+  float q[4];     // quaternion (w,x,y,z) body->NEU
 } __attribute__ ((packed));
 
 // MSP_ALTITUDE reply
@@ -716,4 +718,3 @@ class MSP {
     uint32_t _timeout;
     
 };
-

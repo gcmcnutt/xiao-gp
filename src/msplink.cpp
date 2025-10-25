@@ -108,9 +108,19 @@ void logGPState()
   // Time data only available when test is active
   if (!flight_path.empty())
   {
-    if (rabbit_active) {
-      time_val = state.asOfMsec - rabbit_start_time; // Relative time during test
-    } else {
+    if (rabbit_active)
+    {
+      if (state.asOfMsec >= rabbit_start_time)
+      {
+        time_val = state.asOfMsec - rabbit_start_time; // Relative time during test
+      }
+      else
+      {
+        time_val = 0;
+      }
+    }
+    else
+    {
       time_val = 0; // Test not active
     }
   }
@@ -300,16 +310,14 @@ static void mspUpdateGPControl()
              current_path_index, elapsed_msec, gp_path_segment.start.y(), 
              aircraft_state.getPosition().y(), debug_distance);
     
-    double gp_output = generatedGPProgram(pathProvider, aircraft_state, 0.0);
-
     // Convert GP-controlled aircraft commands to MSP RC values and cache them
     cached_roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
     cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
     cached_throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
 
-    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d setRcData=[%d,%d,%d] out=%.3f time=%lums",
+    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d setRcData=[%d,%d,%d] time=%lums",
              gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
-             current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, gp_output, elapsed_msec);
+             current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, elapsed_msec);
   }
 }
 

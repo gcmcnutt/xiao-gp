@@ -310,6 +310,8 @@ static void mspUpdateGPControl()
              current_path_index, elapsed_msec, gp_path_segment.start.y(), 
              aircraft_state.getPosition().y(), debug_distance);
     
+    generatedGPProgram(pathProvider, aircraft_state, 0.0);
+
     // Convert GP-controlled aircraft commands to MSP RC values and cache them
     cached_roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
     cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());

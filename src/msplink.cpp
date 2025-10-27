@@ -86,7 +86,20 @@ static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
     return Eigen::Quaterniond::Identity();
   }
   q_neu.normalize();
-  return q_neu;
+
+  // INAV publishes orientation as an Earth(NEU)->Body quaternion.
+  // Convert the axes from NEU to NED by flipping the Y and Z components
+  // (equivalent to a 180° rotation about the X and Z axes), yielding an
+  // Earth(NED)->Body quaternion.
+  Eigen::Quaterniond q_earth_to_body_ned(
+      q_neu.w(),
+      -q_neu.x(),
+      -q_neu.y(),
+      q_neu.z());
+
+  // AircraftState expects a Body->Earth (NED) rotation so that
+  // orientation.inverse() maps world vectors into the body frame.
+  return q_earth_to_body_ned.conjugate();
 }
 
 // Unified GP State logging function

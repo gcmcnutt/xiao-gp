@@ -87,19 +87,12 @@ static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
   }
   q_neu.normalize();
 
-  // INAV publishes orientation as an Earth(NEU)->Body quaternion.
-  // Convert the axes from NEU to NED by flipping the Y and Z components
-  // (equivalent to a 180° rotation about the X and Z axes), yielding an
-  // Earth(NED)->Body quaternion.
-  Eigen::Quaterniond q_earth_to_body_ned(
-      q_neu.w(),
-      -q_neu.x(),
-      -q_neu.y(),
-      q_neu.z());
+  // INAV publishes Earth(NEU) -> Body. Rotate 180° about X to convert NEU -> NED.
+  const Eigen::Quaterniond q_flip(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()));
+  Eigen::Quaterniond q_earth_to_body_ned = q_flip * q_neu;
 
-  // AircraftState expects a Body->Earth (NED) rotation so that
-  // orientation.inverse() maps world vectors into the body frame.
-  return q_earth_to_body_ned.conjugate();
+  // Body -> Earth (NED)
+  return q_earth_to_body_ned.conjugate().normalized();
 }
 
 // Unified GP State logging function
@@ -184,40 +177,16 @@ void logGPState()
     if (orientation.norm() > 0.0)
     {
       orientation.normalize();
-      double q0 = orientation.w();
-      double q1 = orientation.x();
-      double q2 = orientation.y();
-      double q3 = orientation.z();
-
-      double q1q1 = q1 * q1;
-      double q2q2 = q2 * q2;
-      double q3q3 = q3 * q3;
-      double q0q1 = q0 * q1;
-      double q0q2 = q0 * q2;
-      double q0q3 = q0 * q3;
-      double q1q2 = q1 * q2;
-      double q1q3 = q1 * q3;
-      double q2q3 = q2 * q3;
-
-      double rMat[3][3];
-      rMat[0][0] = 1.0 - 2.0 * q2q2 - 2.0 * q3q3;
-      rMat[0][1] = 2.0 * (q1q2 - q0q3);
-      rMat[0][2] = 2.0 * (q1q3 + q0q2);
-      rMat[1][0] = 2.0 * (q1q2 + q0q3);
-      rMat[1][1] = 1.0 - 2.0 * q1q1 - 2.0 * q3q3;
-      rMat[1][2] = 2.0 * (q2q3 - q0q1);
-      rMat[2][0] = 2.0 * (q1q3 - q0q2);
-      rMat[2][1] = 2.0 * (q2q3 + q0q1);
-      rMat[2][2] = 1.0 - 2.0 * q1q1 - 2.0 * q2q2;
-
-      double roll_deg = atan2(rMat[2][1], rMat[2][2]) * 180.0 / M_PI;
-      double pitch_deg = (0.5 * M_PI - acos(-rMat[2][0])) * 180.0 / M_PI;
-      double yaw_deg = -atan2(rMat[1][0], rMat[0][0]) * 180.0 / M_PI;
+      Eigen::Vector3d euler = orientation.toRotationMatrix().eulerAngles(2, 1, 0); // yaw, pitch, roll
+      double yaw_deg = euler[0] * 180.0 / M_PI;
+      double pitch_deg = euler[1] * 180.0 / M_PI;
+      double roll_deg = euler[2] * 180.0 / M_PI;
 
       if (yaw_deg < 0) yaw_deg += 360.0;
 
       att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
-      quat_str = String("[") + String(q0, 3) + "," + String(q1, 3) + "," + String(q2, 3) + "," + String(q3, 3) + "]";
+      quat_str = String("[") + String(orientation.w(), 3) + "," + String(orientation.x(), 3) + ","
+                 + String(orientation.y(), 3) + "," + String(orientation.z(), 3) + "]";
     }
   }
   

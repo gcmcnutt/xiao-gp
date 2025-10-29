@@ -87,12 +87,19 @@ static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
   }
   q_neu.normalize();
 
-  // INAV publishes Earth(NEU) -> Body. Rotate 180° about X to convert NEU -> NED.
-  const Eigen::Quaterniond q_flip(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()));
-  Eigen::Quaterniond q_earth_to_body_ned = q_flip * q_neu;
+  // Earth(NEU) -> Body rotation matrix
+  Eigen::Matrix3d R_neu_to_body = q_neu.toRotationMatrix();
 
-  // Body -> Earth (NED)
-  return q_earth_to_body_ned.conjugate().normalized();
+  // Transform Earth frame from NEU to NED (flip Z axis)
+  Eigen::Matrix3d C = Eigen::Matrix3d::Identity();
+  C(2, 2) = -1.0;
+
+  // Body -> Earth (NED) rotation
+  Eigen::Matrix3d R_body_to_earth_ned = C * R_neu_to_body.transpose();
+
+  Eigen::Quaterniond q_body_to_earth_ned(R_body_to_earth_ned);
+  q_body_to_earth_ned.normalize();
+  return q_body_to_earth_ned;
 }
 
 // Unified GP State logging function

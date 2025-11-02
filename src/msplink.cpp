@@ -81,25 +81,19 @@ static Eigen::Vector3d neuVectorToNedMeters(const int32_t vec_cm[3])
 static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
 {
   Eigen::Quaterniond q_neu(q[0], q[1], q[2], q[3]);
-  if (q_neu.norm() == 0.0)
-  {
+  if (q_neu.norm() == 0.0) {
     return Eigen::Quaterniond::Identity();
   }
   q_neu.normalize();
-
-  // Earth(NEU) -> Body rotation matrix
-  Eigen::Matrix3d R_neu_to_body = q_neu.toRotationMatrix();
-
-  // Transform Earth frame from NEU to NED (flip Z axis)
-  Eigen::Matrix3d C = Eigen::Matrix3d::Identity();
-  C(2, 2) = -1.0;
-
-  // Body -> Earth (NED) rotation
-  Eigen::Matrix3d R_body_to_earth_ned = C * R_neu_to_body.transpose();
-
-  Eigen::Quaterniond q_body_to_earth_ned(R_body_to_earth_ned);
-  q_body_to_earth_ned.normalize();
-  return q_body_to_earth_ned;
+  
+  // NEU→NED: 180° rotation around X-axis (North axis)
+  Eigen::Quaterniond q_neu_to_ned(0.0, 1.0, 0.0, 0.0);
+  
+  // Transform: Earth(NED)→Body = (NEU→NED) * Earth(NEU)→Body
+  Eigen::Quaterniond q_ned = q_neu_to_ned * q_neu;
+  q_ned.normalize();
+  
+  return q_ned;
 }
 
 // Unified GP State logging function

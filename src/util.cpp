@@ -79,7 +79,13 @@ void logPrint(LogLevel level, const char* format, ...) {
   // Output to Serial
   Serial.print(prefix);
   Serial.println(logBuffer);
-  
+
+  // Also write to flash logger
+  // Combine prefix and message for flash
+  char flashBuffer[544]; // prefix(32) + logBuffer(512)
+  snprintf(flashBuffer, sizeof(flashBuffer), "%s%s", prefix, logBuffer);
+  flashLoggerWrite(flashBuffer);
+
   va_end(args);
 }
 

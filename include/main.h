@@ -5,6 +5,7 @@
 #include <HardwareSerial.h>
 #include "MSP.h"
 #include "state.h"
+#include "flash_logger.h"
 
 // Forward declarations
 struct AircraftState;

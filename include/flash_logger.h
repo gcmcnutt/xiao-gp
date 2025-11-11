@@ -16,7 +16,7 @@ enum FlashLoggerState {
 
 // Flash logger API
 void flashLoggerInit();
-void flashLoggerWrite(const char* msg);
+uint32_t flashLoggerWrite(const char* msg);
 void flashLoggerFlushCheck();
 void flashLoggerErase();
 bool flashLoggerIsFull();
@@ -30,3 +30,5 @@ bool flashLoggerStartDownload(const char* filename);
 int flashLoggerReadChunk(uint8_t* buffer, size_t maxLen);
 void flashLoggerStopDownload();
 FlashLoggerState flashLoggerGetState();
+bool flashLoggerHasPendingData();
+uint32_t flashLoggerGetActiveDownloadSize();

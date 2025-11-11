@@ -9,11 +9,12 @@ void setup()
   consoleInit();
 
   // Wait for WSL serial port to reconnect after reboot
-  delay(3000);
+  delay(8000);
   Serial.println("\n\n========== XIAO-GP BOOT ==========");
 
   // flash logger (init after console for debug output)
   flashLoggerInit();
+  setLogLevel(DEBUG);
 
   // msp link
   msplinkSetup();

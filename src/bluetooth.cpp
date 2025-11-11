@@ -121,9 +121,13 @@ static void processLoggerCommand(const char* cmd) {
       logPrint(WARNING, "File is empty, nothing to download");
     } else if (flashLoggerStartDownload(filename)) {
       transferInProgress = true;
+      uint32_t filteredSize = flashLoggerGetActiveDownloadSize();
+      if (filteredSize == 0) {
+        filteredSize = fileSize;
+      }
       // Send file size and chunk size so browser knows what to expect
       char statusMsg[64];
-      snprintf(statusMsg, sizeof(statusMsg), "READY:%lu:%d", (unsigned long)fileSize, FLASH_LOGGER_CHUNK_SIZE);
+      snprintf(statusMsg, sizeof(statusMsg), "READY:%lu:%d", (unsigned long)filteredSize, FLASH_LOGGER_CHUNK_SIZE);
       statusCharacteristic.writeValue(statusMsg);
       logPrint(INFO, "Download ready: %s (browser will request chunks)", filename);
     } else {

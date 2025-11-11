@@ -76,15 +76,18 @@ void logPrint(LogLevel level, const char* format, ...) {
   // First print to buffer
   vsnprintf(logBuffer, sizeof(logBuffer), format, args);
   
-  // Output to Serial
-  Serial.print(prefix);
-  Serial.println(logBuffer);
-
-  // Also write to flash logger
-  // Combine prefix and message for flash
+  // Combine prefix and message for flash/Serial output
   char flashBuffer[544]; // prefix(32) + logBuffer(512)
   snprintf(flashBuffer, sizeof(flashBuffer), "%s%s", prefix, logBuffer);
-  flashLoggerWrite(flashBuffer);
+
+  // Write to flash logger and get monotonic message ID
+  uint32_t messageId = flashLoggerWrite(flashBuffer);
+
+  // Output to Serial with matching prefix
+  char idPrefix[20];
+  snprintf(idPrefix, sizeof(idPrefix), "#%08lu ", (unsigned long)messageId);
+  Serial.print(idPrefix);
+  Serial.println(flashBuffer);
 
   va_end(args);
 }

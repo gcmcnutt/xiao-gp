@@ -20,8 +20,9 @@
 
 ### Flight Log Format
 - Raw text format matching `logPrint()` output from util.cpp
-- Format: `<timestamp_ms> <level> <message>\n`
-- Example: `0012345 i Flight controller initialized`
+- Format: `#<message_id> <timestamp_ms> <level> <message>\n`
+- Example: `#00000001 0012345 i Flight controller initialized`
+- Drop marker: `#00001234 LOG_DROP lost 6 messages (ids 1234-1239)` appears whenever buffering pressure forces a discard.
 - Logs written alongside existing Serial console output
 
 ### Implementation Details
@@ -37,15 +38,13 @@
 - **Automatic reboot** after erase to ensure clean state
 
 #### Write Strategy - ✅ IMPLEMENTED
-- **4KB RAM buffer** for pending log entries
-- `flashLoggerWrite()`: Appends formatted log messages to RAM buffer
-- `flashLoggerFlushCheck()`: Called at end of each `loop()`, conditionally flushes to flash
-  - **Smart flush throttling**: Only flushes every 100ms OR when buffer >75% full
-  - **Real-time safe**: Prevents blocking flight control with continuous QSPI writes
-  - **Write timing**: ~200-1000μs per flush depending on buffer size
-- **4-byte alignment** for QSPI writes (padded with nulls)
-- **Metadata saved** every 4KB to keep flash state synchronized
-- **Crash-safe**: Frequent flushes (max 100ms apart) ensure minimal data loss on power failure
+- **Triple 4KB buffers**: active (producer), pending, and in-flight slots keep writes sequential while the logger stays non-blocking.
+- `flashLoggerWrite()` only appends to the active buffer, tags each entry with a monotonic `#00000000` prefix, and never touches QSPI directly; it relies on an explicit `flashLoggerFlushCheck()` (or sync) call to make forward progress.
+- **Manual flushing only**: there is intentionally no automatic flush trigger—each end-of-loop invocation of `flashLoggerFlushCheck()` (or a blocking sync) is what advances the state machine.
+- `flashLoggerFlushCheck()` (called once per `loop()`) drives a state machine that stages buffers, issues a single 256-byte page program, and polls for completion on subsequent passes.
+- **Asynchronous metadata commits**: metadata is marked dirty on each data flush, saved every 4KB, and forced to flash before downloads or file listings.
+- **Back-pressure awareness**: when buffers or flash capacity run out, the logger drops the in-flight buffer, immediately queues an internal `LOG_DROP lost X messages (ids A-B)` entry, and the monotonic prefixes make the gap obvious during post-flight analysis.
+- **Boot console guard**: the main loop stays idle for ~8 seconds after reset so the USB console can reattach before the first log messages are emitted.
 
 #### BLE Interface (GATT Services) - ✅ IMPLEMENTED
 - **Service UUID**: `F1706000-1234-5678-9ABC-DEF012345678`
@@ -93,7 +92,7 @@
 ## Current Status
 
 ### Working Features ✅
-- Flash logging with 4KB RAM buffer
+- Flash logging with triple 4KB buffers and non-blocking flush state machine
 - Flight counter increments on each boot
 - Flight index tracks up to 100 flights
 - BLE GATT service for file operations
@@ -107,11 +106,7 @@
 2. **BLE always enabled** - needs integration with INAV arming state
 
 ### Recent Fixes ✅
-- **CRITICAL: Fixed async QSPI operations** - Added busy-wait loops after read/write/erase
-  - Root cause: `nrfx_qspi_read()`, `nrfx_qspi_write()`, `nrfx_qspi_erase()` are asynchronous
-  - Symptom: Downloads showed all 0xFF (ÿ) because reads returned before data was fetched
-  - Fix: Poll `nrfx_qspi_mem_busy_check()` until operation completes
-  - Erase now takes ~360ms for 2MB (was <1ms before, indicating it wasn't finishing)
+- **Async flush state machine** - Preallocated buffers feed page-program-sized writes while the main loop remains responsive; metadata commits now piggyback on the same scheduler.
 - Fixed download completion trigger (request final chunk after reaching expected size)
 - Implemented non-blocking reboot (500ms delay, allows BLE to send status)
 - Added REBOOT button for manual log rotation

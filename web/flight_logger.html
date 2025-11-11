@@ -131,7 +131,8 @@
     let controlChar;
     let dataChar;
     let statusChar;
-    let downloadBuffer = [];
+    let downloadBuffer = null; // Uint8Array allocated on READY
+    let downloadOffset = 0;
     let expectedFileSize = 0;
     let currentFlightNumber = 0;
 
@@ -241,6 +242,8 @@
           expectedFileSize = parseInt(parts[0]);
           const chunkSize = parseInt(parts[1]);
           console.log('Download ready:', expectedFileSize, 'bytes, chunk size:', chunkSize);
+          downloadBuffer = new Uint8Array(expectedFileSize);
+          downloadOffset = 0;
           // Start requesting chunks
           requestNextChunk();
         }
@@ -296,25 +299,34 @@
     }
 
     function handleDataChunk(event) {
-      // Accumulate data chunks
-      const chunk = new Uint8Array(event.target.value.buffer);
-      downloadBuffer.push(...chunk);
+      // Accumulate only the valid bytes from this notification
+      const valueView = event.target.value;
+      const chunk = new Uint8Array(valueView.buffer, valueView.byteOffset, valueView.byteLength);
+
+      if (!downloadBuffer) {
+        console.warn('Received data chunk before READY; discarding');
+        return;
+      }
+
+      const bytesToCopy = Math.min(chunk.length, downloadBuffer.length - downloadOffset);
+      if (bytesToCopy > 0) {
+        downloadBuffer.set(chunk.subarray(0, bytesToCopy), downloadOffset);
+        downloadOffset += bytesToCopy;
+      }
 
       // Update progress
-      const kbReceived = (downloadBuffer.length / 1024).toFixed(1);
+      const kbReceived = (downloadOffset / 1024).toFixed(1);
       const chunkSize = chunk.length;
       let progressPercent = 0;
       if (expectedFileSize > 0) {
-        progressPercent = Math.min(100, Math.round((downloadBuffer.length / expectedFileSize) * 100));
+        progressPercent = Math.min(100, Math.round((downloadOffset / expectedFileSize) * 100));
       }
       updateProgress(progressPercent, `Received ${kbReceived} KB (${progressPercent}%)`);
-      console.log('Received chunk:', chunkSize, 'bytes, total:', downloadBuffer.length);
+      console.log('Received chunk:', chunkSize, 'bytes, total copied:', downloadOffset);
 
       // Request next chunk (flow control - browser pulls data)
       // Continue requesting until we get DOWNLOAD_DONE status (device returns 0 bytes)
-      if (downloadBuffer.length <= expectedFileSize) {
-        requestNextChunk();
-      }
+      requestNextChunk();
     }
 
     async function listFiles() {
@@ -335,7 +347,8 @@
 
     async function downloadFile(filename) {
       try {
-        downloadBuffer = [];
+        downloadBuffer = null;
+        downloadOffset = 0;
         log('Starting download: ' + filename);
         updateProgress(0, 'Starting...');
 
@@ -351,27 +364,27 @@
     }
 
     function saveDownload() {
-      if (downloadBuffer.length === 0) {
+      if (!downloadBuffer || (downloadOffset === 0 && expectedFileSize > 0)) {
         log('No data to save');
         return;
       }
 
-      const originalLength = downloadBuffer.length;
+      const originalLength = downloadOffset;
       console.log('Buffer before trim:', originalLength, 'bytes');
 
       // Remove trailing zeros (padding) - but limit to max 512 bytes
       let trimCount = 0;
-      while (downloadBuffer.length > 0 &&
-             downloadBuffer[downloadBuffer.length - 1] === 0 &&
+      while (downloadOffset > 0 &&
+             downloadBuffer[downloadOffset - 1] === 0 &&
              trimCount < 512) {
-        downloadBuffer.pop();
+        downloadOffset--;
         trimCount++;
       }
 
       console.log('Trimmed', trimCount, 'trailing nulls');
-      console.log('Buffer after trim:', downloadBuffer.length, 'bytes');
+      console.log('Buffer after trim:', downloadOffset, 'bytes');
 
-      const blob = new Blob([new Uint8Array(downloadBuffer)], { type: 'text/plain' });
+      const blob = new Blob([downloadBuffer.subarray(0, downloadOffset)], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -379,8 +392,10 @@
       a.click();
       URL.revokeObjectURL(url);
 
-      log(`Download saved: ${downloadBuffer.length} bytes (was ${originalLength} before trimming)`);
-      downloadBuffer = [];
+      console.log('First 128 bytes before save:', Array.from(downloadBuffer.subarray(0, 128)));
+      log(`Download saved: ${downloadOffset} bytes (was ${originalLength} before trimming)`);
+      downloadBuffer = null;
+      downloadOffset = 0;
     }
 
     async function rebootDevice() {

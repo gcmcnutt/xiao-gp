@@ -20,6 +20,7 @@ uint32_t flashLoggerWrite(const char* msg);
 void flashLoggerFlushCheck();
 void flashLoggerErase();
 bool flashLoggerIsFull();
+bool flashLoggerIsSuspended();
 
 // File transfer API (for BLE)
 int flashLoggerGetFileCount();

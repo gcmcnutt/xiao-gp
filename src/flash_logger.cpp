@@ -1,6 +1,7 @@
 #include "main.h"
 #include <nrfx_qspi.h>
 #include <string.h>
+#include <ctype.h>
 
 // Flash layout
 // Block 0: Metadata (flight counter, file index)
@@ -35,7 +36,7 @@ struct FlashMetadata {
 };
 
 struct BufferSlot {
-  char data[FLASH_LOGGER_BUFFER_SIZE];
+  alignas(4) char data[FLASH_LOGGER_BUFFER_SIZE];
   size_t payloadLen;   // Actual bytes written by logger
   size_t paddedLen;    // Payload length rounded up for flash write
   size_t writeOffset;  // Bytes already written to flash
@@ -74,6 +75,8 @@ bool flashFull = false;         // Non-static for debug access
 static bool flashError = false;
 static FlashLoggerState currentState = FLASH_IDLE;
 uint32_t writeCallCount = 0;    // Non-static for debug access
+static bool loggingSuspended = false;
+static alignas(4) uint8_t downloadScratch[FLASH_LOGGER_BUFFER_SIZE];
 
 // Download state
 static uint32_t downloadStartAddr = 0;
@@ -81,7 +84,22 @@ static uint32_t downloadReadAddr = 0;
 static uint32_t downloadEndAddr = 0;
 static uint32_t downloadFilteredSize = 0;
 static uint32_t downloadBytesSent = 0;
-static uint32_t downloadDebugChunksLogged = 0;
+static const uint32_t FNV_OFFSET_BASIS = 2166136261u;
+static const uint32_t FNV_PRIME = 16777619u;
+static uint32_t writeChecksumCount = 0;
+static uint32_t readChecksumCount = 0;
+static uint32_t readChecksumHash = FNV_OFFSET_BASIS;
+static size_t readSnippetLen = 0;
+static char readSnippet[64];
+static uint32_t flashWriteChecksumCount = 0;
+static uint32_t flashReadChecksumCount = 0;
+static uint32_t flashVerifyExpectedHash = 0;
+static uint32_t flashVerifyAddr = 0;
+static size_t flashVerifyLen = 0;
+static size_t flashVerifyOffset = 0;
+static bool flashVerifyPending = false;
+static alignas(4) uint8_t flashVerifyBuf[FLASH_PAGE_PROGRAM_SIZE];
+static bool flashPreviewDumped = false;
 
 // Flush management
 static DataFlushState dataFlushState = DATA_FLUSH_IDLE;
@@ -119,6 +137,22 @@ static bool appendMessageToActive(uint32_t msgId, const char* msg, size_t msgLen
 static void handleDroppedRange(uint32_t dropStartId, uint32_t dropEndId);
 static void enqueueDropNotice(uint32_t dropStartId, uint32_t dropEndId);
 static uint32_t computeFilteredSize(uint32_t startAddr, uint32_t endAddr);
+static uint32_t fnv1aUpdate(uint32_t hash, uint8_t byte);
+static void debugPrintChecksum(const char* tag,
+                              uint32_t msgIndex,
+                              uint32_t hash,
+                              const char* snippet);
+static void debugDumpBuffer(const char* tag,
+                           uint32_t baseAddr,
+                           const uint8_t* data,
+                           size_t len);
+static uint32_t fnv1aUpdate(uint32_t hash, uint8_t byte);
+static uint32_t fnv1aUpdate(uint32_t hash, uint8_t byte);
+static bool verifyEraseRange(uint32_t startAddr,
+                             uint32_t endAddr,
+                             uint32_t* firstBadAddr,
+                             uint8_t* firstBadValue,
+                             bool* readFailure);
 
 // QSPI Configuration
 static nrfx_qspi_config_t qspiConfig = {
@@ -131,8 +165,8 @@ static nrfx_qspi_config_t qspiConfig = {
     .io3_pin = 23,
   },
   .prot_if = {
-    .readoc = NRF_QSPI_READOC_READ4O,
-    .writeoc = NRF_QSPI_WRITEOC_PP4O,
+    .readoc = NRF_QSPI_READOC_FASTREAD,
+    .writeoc = NRF_QSPI_WRITEOC_PP,
     .addrmode = NRF_QSPI_ADDRMODE_24BIT,
     .dpmconfig = false,
   },
@@ -140,7 +174,7 @@ static nrfx_qspi_config_t qspiConfig = {
     .sck_delay = 0,
     .dpmen = false,
     .spi_mode = NRF_QSPI_MODE_0,
-    .sck_freq = NRF_QSPI_FREQ_32MDIV1
+    .sck_freq = NRF_QSPI_FREQ_32MDIV8
   },
   .irq_priority = 6
 };
@@ -216,6 +250,7 @@ void flashLoggerInit() {
   metadataPersistQueued = false;
 
   flashInitialized = true;
+  loggingSuspended = false;
 
   Serial.println("DEBUG: flashInitialized=true, flashFull=false");
   logPrint(INFO, "Flash logger initialized, flight #%lu",
@@ -247,7 +282,7 @@ uint32_t flashLoggerWrite(const char* msg) {
   size_t msgLen = strlen(msg);
   bool needsNewline = (msgLen == 0 || msg[msgLen - 1] != '\n');
 
-  if (!flashInitialized || flashFull || flashError) {
+  if (!flashInitialized || flashFull || flashError || loggingSuspended) {
     return messageId;
   }
 
@@ -256,6 +291,28 @@ uint32_t flashLoggerWrite(const char* msg) {
                              ? activeBuffer->firstMessageId
                              : messageId;
     handleDroppedRange(dropStart, messageId);
+  } else if (writeChecksumCount < 10) {
+    uint32_t hash = FNV_OFFSET_BASIS;
+    for (size_t i = 0; i < msgLen; ++i) {
+      hash = fnv1aUpdate(hash, (uint8_t)msg[i]);
+    }
+    if (needsNewline) {
+      hash = fnv1aUpdate(hash, (uint8_t) '\n');
+    }
+
+    size_t snippetLen = msgLen < 60 ? msgLen : 60;
+    char snippet[61];
+    for (size_t i = 0; i < snippetLen; ++i) {
+      unsigned char ch = (unsigned char)msg[i];
+      snippet[i] = isprint(ch) ? (char)ch : '.';
+    }
+    snippet[snippetLen] = '\0';
+
+    debugPrintChecksum("CHK-WRITE",
+                       (uint32_t)messageId,
+                       hash,
+                       snippet);
+    writeChecksumCount++;
   }
 
   return messageId;
@@ -269,6 +326,10 @@ void flashLoggerFlushCheck() {
     serviceFlash(false);
     return;
   }
+  if (loggingSuspended) {
+    serviceFlash(false);
+    return;
+  }
   serviceFlash(true);
 }
 
@@ -276,6 +337,7 @@ void flashLoggerErase() {
   currentState = FLASH_ERASING;
   logPrint(INFO, "Erasing flash logs...");
 
+  loggingSuspended = true;
   flashLoggerSyncBlocking(1000);
 
   Serial.println("DEBUG: Erasing data region (hybrid sector/block)");
@@ -339,6 +401,33 @@ void flashLoggerErase() {
   Serial.print(" blocks, ");
   Serial.print(sectorsErased);
   Serial.println(" sectors)");
+
+  uint32_t badAddr = 0;
+  uint8_t badValue = 0x00;
+  bool readFailure = false;
+  if (!verifyEraseRange(FLASH_DATA_START_ADDR,
+                        FLASH_TOTAL_SIZE,
+                        &badAddr,
+                        &badValue,
+                        &readFailure)) {
+    Serial.print("DEBUG: Erase verify FAILED at 0x");
+    Serial.print(badAddr, HEX);
+    Serial.print(readFailure ? " (read error)" : " value=0x");
+    if (!readFailure) {
+      Serial.print(badValue, HEX);
+    }
+    Serial.println();
+    logPrint(ERROR,
+             readFailure ? "Erase verify read failed @0x%06lX" : "Erase verify mismatch @0x%06lX val=0x%02X",
+             (unsigned long)badAddr,
+             (unsigned int)badValue);
+    flashError = true;
+    flashFull = true;
+    currentState = FLASH_IDLE;
+    return;
+  }
+
+  Serial.println("DEBUG: Erase verify ok (data region all 0xFF)");
 
   metadata.magic = 0xF117DA7A;
   metadata.flightCounter = 0;
@@ -447,6 +536,8 @@ bool flashLoggerStartDownload(const char* filename) {
     return false;
   }
 
+  loggingSuspended = true;
+
   if (!flashLoggerSyncBlocking(FLASH_SYNC_TIMEOUT_DEFAULT_MS)) {
     logPrint(WARNING, "Unable to flush buffers before download");
   }
@@ -454,11 +545,15 @@ bool flashLoggerStartDownload(const char* filename) {
   uint32_t requestedFlight = 0;
   if (sscanf(filename, "flight_%lu.txt", (unsigned long*)&requestedFlight) != 1) {
     logPrint(ERROR, "Invalid filename format: %s", filename);
+    loggingSuspended = false;
     return false;
   }
 
   downloadBytesSent = 0;
-  downloadDebugChunksLogged = 0;
+  readChecksumCount = 0;
+  readChecksumHash = FNV_OFFSET_BASIS;
+  readSnippetLen = 0;
+  readSnippet[0] = '\0';
 
   for (uint32_t i = 0; i < metadata.numFlights; i++) {
     if (metadata.flightIndex[i].flightNumber == requestedFlight) {
@@ -481,6 +576,7 @@ bool flashLoggerStartDownload(const char* filename) {
     if (downloadReadAddr >= downloadEndAddr) {
       logPrint(WARNING, "Flight has no data (start=%lu, end=%lu)",
                (unsigned long)downloadReadAddr, (unsigned long)downloadEndAddr);
+      loggingSuspended = false;
       return false;
     }
 
@@ -493,6 +589,7 @@ bool flashLoggerStartDownload(const char* filename) {
   }
 
   logPrint(ERROR, "Flight #%lu not found", (unsigned long)requestedFlight);
+  loggingSuspended = false;
   return false;
 }
 
@@ -518,15 +615,47 @@ int flashLoggerReadChunk(uint8_t* buffer, size_t maxLen) {
       toRead = maxLen;
     }
 
-    if (!qspiRead(downloadReadAddr, buffer, toRead)) {
-      logPrint(ERROR, "QSPI read failed at addr 0x%lx", (unsigned long)downloadReadAddr);
-      return -1;
-    }
-
     size_t writeIdx = 0;
     for (size_t i = 0; i < toRead; ++i) {
-      if (buffer[i] != 0) {
-        buffer[writeIdx++] = buffer[i];
+      uint32_t byteAddr = downloadReadAddr + i;
+      uint8_t firstSample = 0;
+      uint8_t secondSample = 0;
+      bool stable = false;
+
+      for (int attempt = 0; attempt < 3 && !stable; ++attempt) {
+        while (nrfx_qspi_mem_busy_check()) {
+          delayMicroseconds(5);
+        }
+        if (!qspiRead(byteAddr, &firstSample, 1)) {
+          logPrint(ERROR, "QSPI read failed at addr 0x%lx (sample 1)", (unsigned long)byteAddr);
+          return -1;
+        }
+        delayMicroseconds(5);
+
+        while (nrfx_qspi_mem_busy_check()) {
+          delayMicroseconds(5);
+        }
+        if (!qspiRead(byteAddr, &secondSample, 1)) {
+          logPrint(ERROR, "QSPI read failed at addr 0x%lx (sample 2)", (unsigned long)byteAddr);
+          return -1;
+        }
+
+        if (secondSample == firstSample) {
+          stable = true;
+        } else {
+          firstSample = secondSample;
+          delayMicroseconds(10);
+        }
+      }
+
+      uint8_t finalByte = stable ? secondSample : firstSample;
+      if (!stable) {
+        logPrint(WARNING, "QSPI byte unstable at addr 0x%lx (last=0x%02X)",
+                 (unsigned long)byteAddr, finalByte);
+      }
+
+      if (finalByte != 0) {
+        buffer[writeIdx++] = finalByte;
       }
     }
 
@@ -549,38 +678,30 @@ int flashLoggerReadChunk(uint8_t* buffer, size_t maxLen) {
       }
     }
 
-    if (downloadDebugChunksLogged < 4) {
-      size_t inspectLen = produced;
-      if (inspectLen > 32) {
-        inspectLen = 32;
-      }
-      char asciiBuf[33];
-      for (size_t i = 0; i < inspectLen; ++i) {
-        char c = (buffer[i] >= 0x20 && buffer[i] <= 0x7E) ? (char)buffer[i] : '.';
-        asciiBuf[i] = c;
-      }
-      asciiBuf[inspectLen] = '\0';
-
-      char hexBuf[3 * 32 + 1];
-      for (size_t i = 0; i < inspectLen; ++i) {
-        snprintf(&hexBuf[i * 3], 4, "%02X ", buffer[i]);
-      }
-      hexBuf[inspectLen * 3] = '\0';
-
-      logPrint(DEBUG,
-               "Download chunk #%lu addr=0x%06lx len=%lu ascii='%s' hex=%s",
-               (unsigned long)(downloadDebugChunksLogged + 1),
-               (unsigned long)(downloadReadAddr - toRead),
-               (unsigned long)inspectLen,
-               asciiBuf,
-               hexBuf);
-      downloadDebugChunksLogged++;
-    }
-
   }
 
   if (produced == 0) {
     return 0;
+  }
+
+  if (readChecksumCount < 10) {
+    for (size_t i = 0; i < produced && readChecksumCount < 10; ++i) {
+      uint8_t byte = buffer[i];
+      readChecksumHash = fnv1aUpdate(readChecksumHash, byte);
+      if (byte != '\n' && readSnippetLen < sizeof(readSnippet) - 1) {
+        readSnippet[readSnippetLen++] = isprint((unsigned char)byte) ? (char)byte : '.';
+      }
+      if (byte == '\n') {
+        readSnippet[readSnippetLen] = '\0';
+        debugPrintChecksum("CHK-READ",
+                           readChecksumCount + 1,
+                           readChecksumHash,
+                           readSnippetLen > 0 ? readSnippet : "<empty>");
+        readChecksumCount++;
+        readChecksumHash = FNV_OFFSET_BASIS;
+        readSnippetLen = 0;
+      }
+    }
   }
 
   downloadBytesSent += produced;
@@ -594,7 +715,11 @@ void flashLoggerStopDownload() {
   downloadEndAddr = 0;
   downloadFilteredSize = 0;
   downloadBytesSent = 0;
-  downloadDebugChunksLogged = 0;
+  readChecksumCount = 0;
+  readChecksumHash = FNV_OFFSET_BASIS;
+  readSnippetLen = 0;
+  readSnippet[0] = '\0';
+  loggingSuspended = false;
 }
 
 FlashLoggerState flashLoggerGetState() {
@@ -602,7 +727,7 @@ FlashLoggerState flashLoggerGetState() {
 }
 
 static uint32_t computeFilteredSize(uint32_t startAddr, uint32_t endAddr) {
-  uint8_t scanBuf[128];
+  alignas(4) uint8_t scanBuf[128];
   uint32_t filtered = 0;
   for (uint32_t addr = startAddr; addr < endAddr;) {
     uint32_t remaining = endAddr - addr;
@@ -621,8 +746,114 @@ static uint32_t computeFilteredSize(uint32_t startAddr, uint32_t endAddr) {
   return filtered;
 }
 
+static uint32_t fnv1aUpdate(uint32_t hash, uint8_t byte) {
+  hash ^= byte;
+  hash *= FNV_PRIME;
+  return hash;
+}
+
+static void debugPrintChecksum(const char* tag,
+                              uint32_t msgIndex,
+                              uint32_t hash,
+                              const char* snippet) {
+  Serial.print("DBG: ");
+  Serial.print(tag);
+  Serial.print(" msg=");
+  Serial.print(msgIndex);
+  Serial.print(" sum=0x");
+  Serial.print(hash, HEX);
+  Serial.print(" text='");
+  Serial.print(snippet);
+  Serial.println("'");
+}
+
+static void debugDumpBuffer(const char* tag,
+                           uint32_t baseAddr,
+                           const uint8_t* data,
+                           size_t len) {
+  const size_t bytesPerLine = 16;
+  Serial.print("DBG: ");
+  Serial.print(tag);
+  Serial.print(" @0x");
+  Serial.print(baseAddr, HEX);
+  Serial.print(" len=");
+  Serial.println(len);
+  for (size_t offset = 0; offset < len; offset += bytesPerLine) {
+    size_t chunk = (offset + bytesPerLine <= len) ? bytesPerLine : (len - offset);
+    Serial.print("DBG:   ");
+    Serial.print(tag);
+    Serial.print("+");
+    Serial.print(offset, HEX);
+    Serial.print(" ");
+    for (size_t i = 0; i < chunk; ++i) {
+      uint8_t byte = data[offset + i];
+      if (byte < 16) {
+        Serial.print('0');
+      }
+      Serial.print(byte, HEX);
+      Serial.print(' ');
+    }
+    for (size_t i = chunk; i < bytesPerLine; ++i) {
+      Serial.print("   ");
+    }
+    Serial.print(" | ");
+    for (size_t i = 0; i < chunk; ++i) {
+      uint8_t byte = data[offset + i];
+      Serial.print(isprint(byte) ? (char)byte : '.');
+    }
+    Serial.println();
+  }
+}
+
 uint32_t flashLoggerGetActiveDownloadSize() {
   return downloadFilteredSize;
+}
+
+bool flashLoggerIsSuspended() {
+  return loggingSuspended;
+}
+
+static bool verifyEraseRange(uint32_t startAddr,
+                             uint32_t endAddr,
+                             uint32_t* firstBadAddr,
+                             uint8_t* firstBadValue,
+                             bool* readFailure) {
+  if (firstBadAddr) {
+    *firstBadAddr = 0;
+  }
+  if (firstBadValue) {
+    *firstBadValue = 0xFF;
+  }
+  if (readFailure) {
+    *readFailure = false;
+  }
+
+  alignas(4) uint8_t verifyBuf[FLASH_PAGE_PROGRAM_SIZE];
+  for (uint32_t addr = startAddr; addr < endAddr; addr += FLASH_PAGE_PROGRAM_SIZE) {
+    size_t remaining = endAddr - addr;
+    size_t chunk = remaining < sizeof(verifyBuf) ? remaining : sizeof(verifyBuf);
+    if (!qspiRead(addr, verifyBuf, chunk)) {
+      if (firstBadAddr) {
+        *firstBadAddr = addr;
+      }
+      if (readFailure) {
+        *readFailure = true;
+      }
+      return false;
+    }
+    for (size_t i = 0; i < chunk; ++i) {
+      if (verifyBuf[i] != 0xFF) {
+        if (firstBadAddr) {
+          *firstBadAddr = addr + (uint32_t)i;
+        }
+        if (firstBadValue) {
+          *firstBadValue = verifyBuf[i];
+        }
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 // Internal helpers
@@ -712,6 +943,15 @@ static void resetBufferState() {
   nextMessageId = 1;
   metadataDirty = false;
   metadataPersistQueued = false;
+  writeChecksumCount = 0;
+  flashWriteChecksumCount = 0;
+  flashReadChecksumCount = 0;
+  flashVerifyExpectedHash = 0;
+  flashVerifyAddr = 0;
+  flashVerifyLen = 0;
+  flashVerifyOffset = 0;
+  flashVerifyPending = false;
+  flashPreviewDumped = false;
 }
 
 static inline size_t alignToWord(size_t len) {
@@ -879,9 +1119,48 @@ static void serviceDataFlush() {
       }
       {
         size_t remaining = inflightBuffer->paddedLen - inflightBuffer->writeOffset;
-        inflightChunkSize = (remaining > FLASH_PAGE_PROGRAM_SIZE)
-                                ? FLASH_PAGE_PROGRAM_SIZE
-                                : remaining;
+        uint32_t chunkAddr = inflightBuffer->targetAddr + inflightBuffer->writeOffset;
+        size_t pageOffset = chunkAddr & (FLASH_PAGE_PROGRAM_SIZE - 1);
+        size_t spaceInPage = FLASH_PAGE_PROGRAM_SIZE - pageOffset;
+        inflightChunkSize = remaining;
+        if (inflightChunkSize > spaceInPage) {
+          inflightChunkSize = spaceInPage;
+        }
+        if (inflightChunkSize > FLASH_PAGE_PROGRAM_SIZE) {
+          inflightChunkSize = FLASH_PAGE_PROGRAM_SIZE;
+        }
+        const uint8_t* chunkData = reinterpret_cast<const uint8_t*>(
+            inflightBuffer->data + inflightBuffer->writeOffset);
+        flashVerifyOffset = inflightBuffer->writeOffset;
+        flashVerifyLen = inflightChunkSize;
+        flashVerifyAddr = inflightBuffer->targetAddr + flashVerifyOffset;
+        flashVerifyExpectedHash = FNV_OFFSET_BASIS;
+        for (size_t i = 0; i < flashVerifyLen; ++i) {
+          flashVerifyExpectedHash = fnv1aUpdate(flashVerifyExpectedHash, chunkData[i]);
+        }
+        if (flashWriteChecksumCount < 10) {
+          size_t snippetLen = flashVerifyLen < 60 ? flashVerifyLen : (size_t)60;
+          char snippet[61];
+          size_t idx = 0;
+          for (; idx < snippetLen; ++idx) {
+            unsigned char ch = chunkData[idx];
+            snippet[idx] = isprint(ch) ? (char)ch : '.';
+          }
+          snippet[idx] = '\0';
+          Serial.print("DBG: CHK-FLUSH-WR chunk=");
+          Serial.print(flashWriteChecksumCount + 1);
+          Serial.print(" addr=0x");
+          Serial.print(flashVerifyAddr, HEX);
+          Serial.print(" len=");
+          Serial.print(flashVerifyLen);
+          Serial.print(" sum=0x");
+          Serial.print(flashVerifyExpectedHash, HEX);
+          Serial.print(" text='");
+          Serial.print(snippet);
+          Serial.println("'");
+          flashWriteChecksumCount++;
+        }
+        flashVerifyPending = (flashReadChecksumCount < 10);
         nrfx_err_t err = nrfx_qspi_write(
             inflightBuffer->data + inflightBuffer->writeOffset,
             inflightChunkSize,
@@ -898,6 +1177,11 @@ static void serviceDataFlush() {
           releaseSlot(inflightBuffer);
           inflightBuffer = nullptr;
           dataFlushState = DATA_FLUSH_IDLE;
+          flashVerifyPending = false;
+          flashVerifyExpectedHash = 0;
+          flashVerifyLen = 0;
+          flashVerifyAddr = 0;
+          flashVerifyOffset = 0;
         } else {
           dataFlushState = DATA_FLUSH_WAIT_WRITE;
         }
@@ -911,6 +1195,121 @@ static void serviceDataFlush() {
       }
       if (isFlashBusy()) {
         break;
+      }
+      if (flashVerifyPending && flashVerifyLen > 0) {
+        // Give the flash a moment to settle before the first verification read.
+        delayMicroseconds(5);
+        size_t verifyLen = flashVerifyLen;
+        if (verifyLen > sizeof(flashVerifyBuf)) {
+          verifyLen = sizeof(flashVerifyBuf);
+        }
+        bool readOk = qspiRead(flashVerifyAddr, flashVerifyBuf, verifyLen);
+        if (!readOk) {
+          if (flashReadChecksumCount < 10) {
+            Serial.print("DBG: CHK-FLUSH-RD chunk=");
+            Serial.print(flashReadChecksumCount + 1);
+            Serial.print(" addr=0x");
+            Serial.print(flashVerifyAddr, HEX);
+            Serial.println(" readback failed");
+            flashReadChecksumCount++;
+          }
+        } else {
+          const uint8_t* expected = reinterpret_cast<const uint8_t*>(
+              inflightBuffer->data + flashVerifyOffset);
+          if (!flashPreviewDumped && flashVerifyAddr == FLASH_DATA_START_ADDR) {
+            size_t previewLen = verifyLen < 64 ? verifyLen : 64;
+            debugDumpBuffer("EXPECT", flashVerifyAddr, expected, previewLen);
+            debugDumpBuffer("FLASH", flashVerifyAddr, flashVerifyBuf, previewLen);
+            uint32_t beforeAddr = (flashVerifyAddr >= 16) ? (flashVerifyAddr - 16) : 0;
+            size_t beforeLen = flashVerifyAddr - beforeAddr;
+            if (beforeLen > 0 && beforeLen <= sizeof(flashVerifyBuf)) {
+              uint8_t beforeBuf[16];
+              size_t readLen = beforeLen < sizeof(beforeBuf) ? beforeLen : sizeof(beforeBuf);
+              if (!qspiRead(beforeAddr, beforeBuf, readLen)) {
+                Serial.print("DBG: PRE-NRD fail @0x");
+                Serial.println(beforeAddr, HEX);
+              } else {
+                debugDumpBuffer("FLASH-PRE", beforeAddr, beforeBuf, readLen);
+              }
+            }
+            flashPreviewDumped = true;
+          }
+          bool mismatch = false;
+          size_t diffIndex = 0;
+          for (size_t i = 0; i < verifyLen; ++i) {
+            if (expected[i] != flashVerifyBuf[i]) {
+              mismatch = true;
+              diffIndex = i;
+              break;
+            }
+          }
+          uint32_t readHash = FNV_OFFSET_BASIS;
+          for (size_t i = 0; i < verifyLen; ++i) {
+            readHash = fnv1aUpdate(readHash, flashVerifyBuf[i]);
+          }
+          if (flashReadChecksumCount < 10) {
+            size_t snippetLen = verifyLen < 60 ? verifyLen : (size_t)60;
+            char snippet[61];
+            size_t idx = 0;
+            for (; idx < snippetLen; ++idx) {
+              unsigned char ch = flashVerifyBuf[idx];
+              snippet[idx] = isprint(ch) ? (char)ch : '.';
+            }
+            snippet[idx] = '\0';
+            Serial.print("DBG: CHK-FLUSH-RD chunk=");
+            Serial.print(flashReadChecksumCount + 1);
+            Serial.print(" addr=0x");
+            Serial.print(flashVerifyAddr, HEX);
+            Serial.print(" len=");
+            Serial.print(verifyLen);
+            Serial.print(" sum=0x");
+            Serial.print(readHash, HEX);
+            Serial.print(" match=");
+            Serial.print((!mismatch && readHash == flashVerifyExpectedHash) ? "YES" : "NO");
+            Serial.print(" text='");
+            Serial.print(snippet);
+            Serial.println("'");
+            if (mismatch || readHash != flashVerifyExpectedHash) {
+              Serial.print("DBG: CHK-FLUSH-RD diff@");
+              Serial.print(diffIndex);
+              Serial.print(" exp=0x");
+              Serial.print(expected[diffIndex], HEX);
+              Serial.print(" got=0x");
+              Serial.println(flashVerifyBuf[diffIndex], HEX);
+
+              // Retry once more after a short wait to see if the flash settles.
+              uint8_t retryBuf[64];
+              size_t retryLen = verifyLen < sizeof(retryBuf) ? verifyLen : sizeof(retryBuf);
+              delayMicroseconds(5);
+              if (qspiRead(flashVerifyAddr, retryBuf, retryLen)) {
+                uint32_t retryHash = FNV_OFFSET_BASIS;
+                for (size_t i = 0; i < retryLen; ++i) {
+                  retryHash = fnv1aUpdate(retryHash, retryBuf[i]);
+                }
+                Serial.print("DBG: CHK-FLUSH-RD2 chunk=");
+                Serial.print(flashReadChecksumCount + 1);
+                Serial.print(" addr=0x");
+                Serial.print(flashVerifyAddr, HEX);
+                Serial.print(" len=");
+                Serial.print(retryLen);
+                Serial.print(" sum=0x");
+                Serial.print(retryHash, HEX);
+                Serial.print(" text='");
+                for (size_t i = 0; i < (retryLen < 60 ? retryLen : (size_t)60); ++i) {
+                  unsigned char ch2 = retryBuf[i];
+                  Serial.print(isprint(ch2) ? (char)ch2 : '.');
+                }
+                Serial.println("'");
+              }
+            }
+            flashReadChecksumCount++;
+          }
+        }
+        flashVerifyPending = false;
+        flashVerifyExpectedHash = 0;
+        flashVerifyLen = 0;
+        flashVerifyAddr = 0;
+        flashVerifyOffset = 0;
       }
       inflightBuffer->writeOffset += inflightChunkSize;
       if (inflightBuffer->writeOffset >= inflightBuffer->paddedLen) {

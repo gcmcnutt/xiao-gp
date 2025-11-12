@@ -14,7 +14,6 @@ void setup()
 
   // flash logger (init after console for debug output)
   flashLoggerInit();
-  setLogLevel(DEBUG);
 
   // msp link
   msplinkSetup();
@@ -36,10 +35,13 @@ void loop()
     extern bool flashInitialized;
     extern bool flashFull;
     extern uint32_t writeCallCount;
+    bool suspended = flashLoggerIsSuspended();
     Serial.print("\n[STATUS] FlashLogger: init=");
     Serial.print(flashInitialized ? "YES" : "NO");
     Serial.print(" full=");
     Serial.print(flashFull ? "YES" : "NO");
+    Serial.print(" suspended=");
+    Serial.print(suspended ? "YES" : "NO");
     Serial.print(" writes=");
     Serial.println(writeCallCount);
     lastStatusPrint = millis();

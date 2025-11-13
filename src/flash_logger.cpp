@@ -121,11 +121,6 @@ static bool appendMessageToActive(uint32_t msgId, const char* msg, size_t msgLen
 static void handleDroppedRange(uint32_t dropStartId, uint32_t dropEndId);
 static void enqueueDropNotice(uint32_t dropStartId, uint32_t dropEndId);
 static void archiveCurrentFlight();
-static bool verifyEraseRange(uint32_t startAddr,
-                             uint32_t endAddr,
-                             uint32_t* firstBadAddr,
-                             uint8_t* firstBadValue,
-                             bool* readFailure);
 
 // QSPI Configuration
 static nrfx_qspi_config_t qspiConfig = {
@@ -154,22 +149,15 @@ static nrfx_qspi_config_t qspiConfig = {
 
 void flashLoggerInit() {
   if (flashInitialized) {
-    Serial.println("DEBUG: flashLoggerInit() - already initialized");
     return;
   }
-
-  Serial.println("DEBUG: flashLoggerInit() - starting init");
 
   if (!qspiInit()) {
     logPrint(ERROR, "QSPI init failed");
-    Serial.println("DEBUG: QSPI init FAILED");
     return;
   }
-  Serial.println("DEBUG: QSPI init success");
 
   if (!loadMetadata()) {
-    Serial.print("DEBUG: loadMetadata() FAILED - magic=0x");
-    Serial.println(metadata.magic, HEX);
     logPrint(WARNING, "Flash not initialized! Use 'Erase All Logs' via BLE to initialize.");
     logPrint(WARNING, "Logging is DISABLED until flash is erased/initialized.");
 
@@ -182,14 +170,8 @@ void flashLoggerInit() {
     flashInitialized = false;
     flashFull = true;
     flashError = true;
-    Serial.println("DEBUG: flashInitialized=false, flashFull=true");
     return;
   }
-
-  Serial.print("DEBUG: loadMetadata() SUCCESS - magic=0x");
-  Serial.print(metadata.magic, HEX);
-  Serial.print(" flight=");
-  Serial.println(metadata.flightCounter);
 
   flashError = false;
   flashFull = false;
@@ -211,7 +193,6 @@ void flashLoggerInit() {
   flashInitialized = true;
   loggingSuspended = true;
 
-  Serial.println("DEBUG: flashInitialized=true, flashFull=false");
   logPrint(INFO, "Flash logger initialized, awaiting arm (next flight #%lu)",
            (unsigned long)(metadata.flightCounter + 1));
 }
@@ -220,19 +201,6 @@ uint32_t flashLoggerWrite(const char* msg) {
   writeCallCount++;
 
   uint32_t messageId = nextMessageId++;
-
-  if (writeCallCount % 100 == 1) {
-    Serial.print("DEBUG: flashLoggerWrite call #");
-    Serial.print(writeCallCount);
-    Serial.print(" msgId=");
-    Serial.print(messageId);
-    Serial.print(" init=");
-    Serial.print(flashInitialized);
-    Serial.print(" full=");
-    Serial.print(flashFull);
-    Serial.print(" err=");
-    Serial.println(flashError);
-  }
 
   if (msg == nullptr) {
     return messageId;
@@ -349,7 +317,6 @@ void flashLoggerErase() {
   loggingSuspended = true;
   flashLoggerSyncBlocking(1000);
 
-  Serial.println("DEBUG: Erasing data region (hybrid sector/block)");
   unsigned long startTime = millis();
 
   const uint32_t dataEndAddr = FLASH_TOTAL_SIZE;
@@ -370,9 +337,6 @@ void flashLoggerErase() {
       return;
     }
     sectorsErased++;
-    if (sectorsErased % 16 == 0) {
-      Serial.print("s");
-    }
   }
 
   // Step 2: Erase the bulk of the space with 64KB block erases
@@ -383,9 +347,6 @@ void flashLoggerErase() {
       return;
     }
     blocksErased++;
-    if (blocksErased % 4 == 0) {
-      Serial.print("B");
-    }
   }
 
   // Step 3: Clean up any remaining tail sectors (should be <64KB)
@@ -396,47 +357,9 @@ void flashLoggerErase() {
       return;
     }
     sectorsErased++;
-    if (sectorsErased % 16 == 0) {
-      Serial.print("s");
-    }
   }
 
   unsigned long elapsedMs = millis() - startTime;
-  Serial.println();
-  Serial.print("DEBUG: Data erase complete in ");
-  Serial.print(elapsedMs);
-  Serial.print("ms (");
-  Serial.print(blocksErased);
-  Serial.print(" blocks, ");
-  Serial.print(sectorsErased);
-  Serial.println(" sectors)");
-
-  uint32_t badAddr = 0;
-  uint8_t badValue = 0x00;
-  bool readFailure = false;
-  if (!verifyEraseRange(FLASH_DATA_START_ADDR,
-                        FLASH_TOTAL_SIZE,
-                        &badAddr,
-                        &badValue,
-                        &readFailure)) {
-    Serial.print("DEBUG: Erase verify FAILED at 0x");
-    Serial.print(badAddr, HEX);
-    Serial.print(readFailure ? " (read error)" : " value=0x");
-    if (!readFailure) {
-      Serial.print(badValue, HEX);
-    }
-    Serial.println();
-    logPrint(ERROR,
-             readFailure ? "Erase verify read failed @0x%06lX" : "Erase verify mismatch @0x%06lX val=0x%02X",
-             (unsigned long)badAddr,
-             (unsigned int)badValue);
-    flashError = true;
-    flashFull = true;
-    currentState = FLASH_IDLE;
-    return;
-  }
-
-  Serial.println("DEBUG: Erase verify ok (data region all 0xFF)");
 
   metadata.magic = 0xF117DA7A;
   metadata.flightCounter = 0;
@@ -445,10 +368,13 @@ void flashLoggerErase() {
   metadata.numFlights = 0;
   memset(metadata.flightIndex, 0, sizeof(metadata.flightIndex));
 
-  Serial.print("DEBUG: Saving metadata after full erase");
-  bool saved = saveMetadataBlocking();
-  Serial.print(" - ");
-  Serial.println(saved ? "SUCCESS" : "FAILED");
+  if (!saveMetadataBlocking()) {
+    logPrint(ERROR, "Flash erase metadata save failed");
+    flashError = true;
+    flashFull = true;
+    currentState = FLASH_IDLE;
+    return;
+  }
 
   resetBufferState();
   metadataLastSavedAddr = metadata.currentWriteAddr;
@@ -458,7 +384,11 @@ void flashLoggerErase() {
   flashFull = false;
   flashError = false;
 
-  logPrint(INFO, "Flash erased and initialized");
+  logPrint(INFO,
+           "Flash erased and initialized (%lu blocks, %lu sectors, %lums)",
+           (unsigned long)blocksErased,
+           (unsigned long)sectorsErased,
+           (unsigned long)elapsedMs);
   currentState = FLASH_IDLE;
 }
 
@@ -724,49 +654,6 @@ uint32_t flashLoggerGetActiveDownloadSize() {
 
 bool flashLoggerIsSuspended() {
   return loggingSuspended;
-}
-
-static bool verifyEraseRange(uint32_t startAddr,
-                             uint32_t endAddr,
-                             uint32_t* firstBadAddr,
-                             uint8_t* firstBadValue,
-                             bool* readFailure) {
-  if (firstBadAddr) {
-    *firstBadAddr = 0;
-  }
-  if (firstBadValue) {
-    *firstBadValue = 0xFF;
-  }
-  if (readFailure) {
-    *readFailure = false;
-  }
-
-  alignas(4) uint8_t verifyBuf[FLASH_PAGE_PROGRAM_SIZE];
-  for (uint32_t addr = startAddr; addr < endAddr; addr += FLASH_PAGE_PROGRAM_SIZE) {
-    size_t remaining = endAddr - addr;
-    size_t chunk = remaining < sizeof(verifyBuf) ? remaining : sizeof(verifyBuf);
-    if (!qspiRead(addr, verifyBuf, chunk)) {
-      if (firstBadAddr) {
-        *firstBadAddr = addr;
-      }
-      if (readFailure) {
-        *readFailure = true;
-      }
-      return false;
-    }
-    for (size_t i = 0; i < chunk; ++i) {
-      if (verifyBuf[i] != 0xFF) {
-        if (firstBadAddr) {
-          *firstBadAddr = addr + (uint32_t)i;
-        }
-        if (firstBadValue) {
-          *firstBadValue = verifyBuf[i];
-        }
-        return false;
-      }
-    }
-  }
-  return true;
 }
 
 // Internal helpers

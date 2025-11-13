@@ -125,15 +125,6 @@
     const DATA_CHAR_UUID = 'f1706002-1234-5678-9abc-def012345678';
     const STATUS_CHAR_UUID = 'f1706003-1234-5678-9abc-def012345678';
 
-    const FNV_OFFSET = 0x811c9dc5;
-    const FNV_PRIME = 0x01000193;
-
-    function fnv1aUpdate(hash, byte) {
-      hash ^= byte;
-      hash = Math.imul(hash, FNV_PRIME) >>> 0;
-      return hash >>> 0;
-    }
-
     let device;
     let loggerService;
     let controlChar;
@@ -146,7 +137,6 @@
 
     function log(msg) {
       document.getElementById('status').textContent = msg;
-      console.log(msg);
     }
 
     function updateProgress(percent, text) {
@@ -234,7 +224,6 @@
       } else if (value.startsWith('CURRENT:')) {
         // Parse: CURRENT:5
         currentFlightNumber = parseInt(value.substring(8));
-        console.log('Current flight:', currentFlightNumber);
       } else if (value === 'LIST_DONE') {
         log('File list received');
       } else if (value === 'ERASE_DONE') {
@@ -245,7 +234,6 @@
         if (parts.length >= 2) {
           expectedFileSize = parseInt(parts[0]);
           const chunkSize = parseInt(parts[1]);
-          console.log('Download ready:', expectedFileSize, 'bytes, chunk size:', chunkSize);
           downloadBuffer = new Uint8Array(expectedFileSize);
           downloadOffset = 0;
           // Start requesting chunks
@@ -326,7 +314,6 @@
         progressPercent = Math.min(100, Math.round((downloadOffset / expectedFileSize) * 100));
       }
       updateProgress(progressPercent, `Received ${kbReceived} KB (${progressPercent}%)`);
-      console.log('Received chunk:', chunkSize, 'bytes, total copied:', downloadOffset);
 
       // Request next chunk (flow control - browser pulls data)
       // Continue requesting until we get DOWNLOAD_DONE status (device returns 0 bytes)
@@ -374,7 +361,6 @@
       }
 
       const originalLength = downloadOffset;
-      console.log('Buffer before trim:', originalLength, 'bytes');
 
       // Remove trailing zeros (padding) - but limit to max 512 bytes
       let trimCount = 0;
@@ -385,29 +371,6 @@
         trimCount++;
       }
 
-      console.log('Trimmed', trimCount, 'trailing nulls');
-      console.log('Buffer after trim:', downloadOffset, 'bytes');
-
-      const maxChecks = 10;
-      let cursor = 0;
-      for (let msg = 0; msg < maxChecks && cursor < downloadOffset; msg++) {
-        let hash = FNV_OFFSET;
-        let snippet = '';
-        while (cursor < downloadOffset) {
-          const byte = downloadBuffer[cursor++];
-          hash = fnv1aUpdate(hash, byte);
-          if (byte !== 0x0A && snippet.length < 60) {
-            snippet += (byte >= 0x20 && byte <= 0x7E) ? String.fromCharCode(byte) : '.';
-          }
-          if (byte === 0x0A) {
-            console.log(`CHK-BROWSER msg=${msg + 1} sum=0x${hash.toString(16).padStart(8, '0')} text='${snippet}'`);
-            hash = FNV_OFFSET;
-            snippet = '';
-            break;
-          }
-        }
-      }
-
       const blob = new Blob([downloadBuffer.subarray(0, downloadOffset)], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -416,7 +379,6 @@
       a.click();
       URL.revokeObjectURL(url);
 
-      console.log('First 128 bytes before save:', Array.from(downloadBuffer.subarray(0, 128)));
       log(`Download saved: ${downloadOffset} bytes (was ${originalLength} before trimming)`);
       downloadBuffer = null;
       downloadOffset = 0;

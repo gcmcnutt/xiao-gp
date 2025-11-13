@@ -18,6 +18,8 @@ enum FlashLoggerState {
 void flashLoggerInit();
 uint32_t flashLoggerWrite(const char* msg);
 void flashLoggerFlushCheck();
+bool flashLoggerBeginFlight();
+void flashLoggerEndFlight();
 void flashLoggerErase();
 bool flashLoggerIsFull();
 bool flashLoggerIsSuspended();

@@ -112,7 +112,6 @@
 
     <div>
       <button id="listBtn" onclick="listFiles()" disabled>List Flight Logs</button>
-      <button id="rebootBtn" onclick="rebootDevice()" disabled>Reboot Device</button>
       <button id="eraseBtn" onclick="eraseAll()" disabled class="danger">Erase All Logs</button>
     </div>
 
@@ -193,7 +192,6 @@
         document.getElementById('connectBtn').disabled = true;
         document.getElementById('disconnectBtn').disabled = false;
         document.getElementById('listBtn').disabled = false;
-        document.getElementById('rebootBtn').disabled = false;
         document.getElementById('eraseBtn').disabled = false;
         document.getElementById('connectionStatus').textContent = '● Connected';
         document.getElementById('connectionStatus').className = 'connected';
@@ -216,7 +214,6 @@
       document.getElementById('connectBtn').disabled = false;
       document.getElementById('disconnectBtn').disabled = true;
       document.getElementById('listBtn').disabled = true;
-      document.getElementById('rebootBtn').disabled = true;
       document.getElementById('eraseBtn').disabled = true;
       document.getElementById('connectionStatus').textContent = '● Disconnected';
       document.getElementById('connectionStatus').className = 'disconnected';
@@ -242,8 +239,6 @@
         log('File list received');
       } else if (value === 'ERASE_DONE') {
         log('✓ Flash erased! Device will reboot automatically...');
-      } else if (value === 'REBOOT') {
-        log('Device rebooting...');
       } else if (value.startsWith('READY:')) {
         // Parse: READY:filesize:chunksize
         const parts = value.substring(6).split(':');
@@ -425,23 +420,6 @@
       log(`Download saved: ${downloadOffset} bytes (was ${originalLength} before trimming)`);
       downloadBuffer = null;
       downloadOffset = 0;
-    }
-
-    async function rebootDevice() {
-      if (!confirm('Reboot device? Current flight log will be saved and a new flight will start.')) {
-        return;
-      }
-
-      try {
-        log('Rebooting device...');
-        const encoder = new TextEncoder();
-        await controlChar.writeValue(encoder.encode('REBOOT'));
-
-        log('Reboot command sent. Device will disconnect and restart.');
-
-      } catch (error) {
-        log('Error rebooting: ' + error);
-      }
     }
 
     async function eraseAll() {

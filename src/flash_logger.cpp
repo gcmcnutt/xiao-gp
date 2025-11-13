@@ -121,6 +121,7 @@ static bool qspiEraseBlocking(uint32_t addr, nrf_qspi_erase_len_t len);
 static bool loadMetadata();
 static bool saveMetadataBlocking();
 static void resetBufferState();
+static uint32_t computeFilteredSize(uint32_t startAddr, uint32_t endAddr);
 static inline size_t alignToWord(size_t len);
 static BufferSlot* acquireFreeSlot();
 static void releaseSlot(BufferSlot* slot);
@@ -136,7 +137,7 @@ static void resetSlotMetadata(BufferSlot* slot);
 static bool appendMessageToActive(uint32_t msgId, const char* msg, size_t msgLen, bool needsNewline);
 static void handleDroppedRange(uint32_t dropStartId, uint32_t dropEndId);
 static void enqueueDropNotice(uint32_t dropStartId, uint32_t dropEndId);
-static uint32_t computeFilteredSize(uint32_t startAddr, uint32_t endAddr);
+static void archiveCurrentFlight();
 static uint32_t fnv1aUpdate(uint32_t hash, uint8_t byte);
 static void debugPrintChecksum(const char* tag,
                               uint32_t msgIndex,
@@ -221,21 +222,7 @@ void flashLoggerInit() {
   flashError = false;
   flashFull = false;
 
-  if (metadata.flightCounter > 0 && metadata.currentWriteAddr > metadata.currentFileStartAddr) {
-    if (metadata.numFlights < MAX_FLIGHT_INDEX) {
-      metadata.flightIndex[metadata.numFlights].flightNumber = metadata.flightCounter;
-      metadata.flightIndex[metadata.numFlights].startAddr = metadata.currentFileStartAddr;
-      metadata.flightIndex[metadata.numFlights].endAddr = metadata.currentWriteAddr;
-      metadata.numFlights++;
-      logPrint(INFO, "Archived flight #%lu to index (%lu flights total)",
-               (unsigned long)metadata.flightCounter,
-               (unsigned long)metadata.numFlights);
-    } else {
-      logPrint(WARNING, "Flight index full, oldest flight will be lost");
-    }
-  }
-
-  metadata.flightCounter++;
+  archiveCurrentFlight();
   metadata.currentFileStartAddr = metadata.currentWriteAddr;
   if (!saveMetadataBlocking()) {
     logPrint(ERROR, "Failed to persist flight metadata");
@@ -250,11 +237,11 @@ void flashLoggerInit() {
   metadataPersistQueued = false;
 
   flashInitialized = true;
-  loggingSuspended = false;
+  loggingSuspended = true;
 
   Serial.println("DEBUG: flashInitialized=true, flashFull=false");
-  logPrint(INFO, "Flash logger initialized, flight #%lu",
-           (unsigned long)metadata.flightCounter);
+  logPrint(INFO, "Flash logger initialized, awaiting arm (next flight #%lu)",
+           (unsigned long)(metadata.flightCounter + 1));
 }
 
 uint32_t flashLoggerWrite(const char* msg) {
@@ -331,6 +318,78 @@ void flashLoggerFlushCheck() {
     return;
   }
   serviceFlash(true);
+}
+
+bool flashLoggerBeginFlight() {
+  if (!flashInitialized || flashFull || flashError) {
+    return false;
+  }
+
+  if (!loggingSuspended) {
+    return true;
+  }
+
+  if (!flashLoggerSyncBlocking(FLASH_SYNC_TIMEOUT_DEFAULT_MS)) {
+    logPrint(WARNING, "Unable to sync flash before starting new flight");
+  }
+
+  metadata.flightCounter++;
+  metadata.currentFileStartAddr = metadata.currentWriteAddr;
+
+  if (!saveMetadataBlocking()) {
+    logPrint(ERROR, "Failed to persist flight metadata");
+    flashFull = true;
+    flashError = true;
+    return false;
+  }
+
+  resetBufferState();
+  metadataLastSavedAddr = metadata.currentWriteAddr;
+  metadataDirty = false;
+  metadataPersistQueued = false;
+  loggingSuspended = false;
+
+  logPrint(INFO, "Flash logger armed - recording flight #%lu",
+           (unsigned long)metadata.flightCounter);
+  return true;
+}
+
+void flashLoggerEndFlight() {
+  if (!flashInitialized) {
+    return;
+  }
+
+  bool wasLogging = !loggingSuspended;
+  loggingSuspended = true;
+
+  if (!flashLoggerSyncBlocking(FLASH_SYNC_TIMEOUT_DEFAULT_MS)) {
+    logPrint(WARNING, "Unable to flush flash logger before disarm");
+  }
+
+  bool hadData = metadata.currentWriteAddr > metadata.currentFileStartAddr;
+  archiveCurrentFlight();
+  metadata.currentFileStartAddr = metadata.currentWriteAddr;
+
+  if (hadData) {
+    if (!saveMetadataBlocking()) {
+      logPrint(ERROR, "Failed to persist flight metadata");
+      flashFull = true;
+      flashError = true;
+    }
+  }
+
+  resetBufferState();
+  metadataLastSavedAddr = metadata.currentWriteAddr;
+  metadataDirty = false;
+  metadataPersistQueued = false;
+
+  if (wasLogging && hadData) {
+    logPrint(INFO, "Flash logger disarmed - finalized flight #%lu",
+             (unsigned long)metadata.flightCounter);
+  } else if (wasLogging) {
+    logPrint(INFO, "Flash logger disarmed - no data recorded for flight #%lu",
+             (unsigned long)metadata.flightCounter);
+  }
 }
 
 void flashLoggerErase() {
@@ -484,6 +543,9 @@ bool flashLoggerHasPendingData() {
 }
 
 uint32_t flashLoggerGetCurrentFlightNumber() {
+  if (loggingSuspended || flashFull || flashError) {
+    return 0;
+  }
   return metadata.flightCounter;
 }
 
@@ -536,7 +598,10 @@ bool flashLoggerStartDownload(const char* filename) {
     return false;
   }
 
-  loggingSuspended = true;
+  if (!loggingSuspended) {
+    logPrint(WARNING, "Cannot start download while flight logging active");
+    return false;
+  }
 
   if (!flashLoggerSyncBlocking(FLASH_SYNC_TIMEOUT_DEFAULT_MS)) {
     logPrint(WARNING, "Unable to flush buffers before download");
@@ -545,7 +610,6 @@ bool flashLoggerStartDownload(const char* filename) {
   uint32_t requestedFlight = 0;
   if (sscanf(filename, "flight_%lu.txt", (unsigned long*)&requestedFlight) != 1) {
     logPrint(ERROR, "Invalid filename format: %s", filename);
-    loggingSuspended = false;
     return false;
   }
 
@@ -555,42 +619,69 @@ bool flashLoggerStartDownload(const char* filename) {
   readSnippetLen = 0;
   readSnippet[0] = '\0';
 
+  uint32_t startAddr = 0;
+  uint32_t endAddr = 0;
+  bool foundInArchive = false;
+
   for (uint32_t i = 0; i < metadata.numFlights; i++) {
     if (metadata.flightIndex[i].flightNumber == requestedFlight) {
-      downloadStartAddr = metadata.flightIndex[i].startAddr;
-      downloadReadAddr = metadata.flightIndex[i].startAddr;
-      downloadEndAddr = metadata.flightIndex[i].endAddr;
-      currentState = FLASH_DOWNLOADING;
-      downloadFilteredSize = computeFilteredSize(downloadStartAddr, downloadEndAddr);
-      logPrint(INFO, "Starting download: %s (%lu bytes)",
-               filename, (unsigned long)(downloadEndAddr - downloadStartAddr));
-      return true;
+      startAddr = metadata.flightIndex[i].startAddr;
+      endAddr = metadata.flightIndex[i].endAddr;
+      foundInArchive = true;
+      break;
     }
   }
 
-  if (requestedFlight == metadata.flightCounter) {
-    downloadStartAddr = metadata.currentFileStartAddr;
-    downloadReadAddr = metadata.currentFileStartAddr;
-    downloadEndAddr = metadata.currentWriteAddr;
+  bool isCurrentFlight = (requestedFlight == metadata.flightCounter);
 
-    if (downloadReadAddr >= downloadEndAddr) {
-      logPrint(WARNING, "Flight has no data (start=%lu, end=%lu)",
-               (unsigned long)downloadReadAddr, (unsigned long)downloadEndAddr);
-      loggingSuspended = false;
+  if (!foundInArchive) {
+    if (isCurrentFlight) {
+      startAddr = metadata.currentFileStartAddr;
+      endAddr = metadata.currentWriteAddr;
+    } else {
+      logPrint(ERROR, "Flight #%lu not found", (unsigned long)requestedFlight);
       return false;
     }
-
-    currentState = FLASH_DOWNLOADING;
-    downloadFilteredSize = computeFilteredSize(downloadStartAddr, downloadEndAddr);
-    logPrint(INFO, "Starting download: %s (%lu bytes) addr 0x%lx-0x%lx",
-             filename, (unsigned long)(downloadEndAddr - downloadStartAddr),
-             (unsigned long)downloadStartAddr, (unsigned long)downloadEndAddr);
-    return true;
   }
 
-  logPrint(ERROR, "Flight #%lu not found", (unsigned long)requestedFlight);
-  loggingSuspended = false;
-  return false;
+  if (startAddr >= endAddr) {
+    logPrint(WARNING, "Flight #%lu has no stored data", (unsigned long)requestedFlight);
+    return false;
+  }
+
+  downloadStartAddr = startAddr;
+  downloadReadAddr = startAddr;
+  downloadEndAddr = endAddr;
+  uint32_t rawLength = endAddr - startAddr;
+  uint32_t filteredLength = computeFilteredSize(downloadStartAddr, downloadEndAddr);
+  logPrint(INFO, "Download span: raw=%lu filtered=%lu",
+           (unsigned long)rawLength, (unsigned long)filteredLength);
+  if (filteredLength == 0) {
+    if (rawLength > 0) {
+      logPrint(WARNING, "Filtered size is zero, using raw length fallback");
+      filteredLength = rawLength;
+      size_t previewLen = rawLength < 64 ? rawLength : (size_t)64;
+      if (previewLen > 0) {
+        uint8_t previewBuf[64];
+        if (qspiRead(downloadStartAddr, previewBuf, previewLen)) {
+          debugDumpBuffer("DL-PREVIEW", downloadStartAddr, previewBuf, previewLen);
+        } else {
+          logPrint(WARNING, "Preview read failed at addr 0x%lx",
+                   (unsigned long)downloadStartAddr);
+        }
+      }
+    } else {
+      logPrint(WARNING, "Flight #%lu has no non-zero data", (unsigned long)requestedFlight);
+      return false;
+    }
+  }
+  downloadFilteredSize = filteredLength;
+  currentState = FLASH_DOWNLOADING;
+
+  logPrint(INFO, "Starting download: %s (%lu bytes) addr 0x%lx-0x%lx",
+           filename, (unsigned long)(downloadEndAddr - downloadStartAddr),
+           (unsigned long)downloadStartAddr, (unsigned long)downloadEndAddr);
+  return true;
 }
 
 int flashLoggerReadChunk(uint8_t* buffer, size_t maxLen) {
@@ -610,61 +701,32 @@ int flashLoggerReadChunk(uint8_t* buffer, size_t maxLen) {
 
   size_t produced = 0;
   while (produced == 0 && downloadReadAddr < downloadEndAddr) {
-    size_t toRead = downloadEndAddr - downloadReadAddr;
+    size_t remainingFlash = downloadEndAddr - downloadReadAddr;
+
+    size_t toRead = remainingFlash;
     if (toRead > maxLen) {
       toRead = maxLen;
     }
 
+    while (nrfx_qspi_mem_busy_check()) {
+      delayMicroseconds(5);
+    }
+    if (!qspiRead(downloadReadAddr, downloadScratch, toRead)) {
+      logPrint(ERROR, "QSPI chunk read failed at addr 0x%lx len=%lu",
+               (unsigned long)downloadReadAddr, (unsigned long)toRead);
+      return -1;
+    }
+
     size_t writeIdx = 0;
     for (size_t i = 0; i < toRead; ++i) {
-      uint32_t byteAddr = downloadReadAddr + i;
-      uint8_t firstSample = 0;
-      uint8_t secondSample = 0;
-      bool stable = false;
-
-      for (int attempt = 0; attempt < 3 && !stable; ++attempt) {
-        while (nrfx_qspi_mem_busy_check()) {
-          delayMicroseconds(5);
-        }
-        if (!qspiRead(byteAddr, &firstSample, 1)) {
-          logPrint(ERROR, "QSPI read failed at addr 0x%lx (sample 1)", (unsigned long)byteAddr);
-          return -1;
-        }
-        delayMicroseconds(5);
-
-        while (nrfx_qspi_mem_busy_check()) {
-          delayMicroseconds(5);
-        }
-        if (!qspiRead(byteAddr, &secondSample, 1)) {
-          logPrint(ERROR, "QSPI read failed at addr 0x%lx (sample 2)", (unsigned long)byteAddr);
-          return -1;
-        }
-
-        if (secondSample == firstSample) {
-          stable = true;
-        } else {
-          firstSample = secondSample;
-          delayMicroseconds(10);
-        }
-      }
-
-      uint8_t finalByte = stable ? secondSample : firstSample;
-      if (!stable) {
-        logPrint(WARNING, "QSPI byte unstable at addr 0x%lx (last=0x%02X)",
-                 (unsigned long)byteAddr, finalByte);
-      }
-
-      if (finalByte != 0) {
-        buffer[writeIdx++] = finalByte;
+      uint8_t byte = downloadScratch[i];
+      if (byte != 0) {
+        buffer[writeIdx++] = byte;
       }
     }
 
     downloadReadAddr += toRead;
     produced = writeIdx;
-
-    if (produced == 0) {
-      continue;
-    }
 
     if (downloadFilteredSize > 0) {
       uint32_t remaining = downloadFilteredSize > downloadBytesSent
@@ -677,7 +739,6 @@ int flashLoggerReadChunk(uint8_t* buffer, size_t maxLen) {
         produced = remaining;
       }
     }
-
   }
 
   if (produced == 0) {
@@ -719,7 +780,6 @@ void flashLoggerStopDownload() {
   readChecksumHash = FNV_OFFSET_BASIS;
   readSnippetLen = 0;
   readSnippet[0] = '\0';
-  loggingSuspended = false;
 }
 
 FlashLoggerState flashLoggerGetState() {
@@ -924,6 +984,27 @@ static bool saveMetadataBlocking() {
     return false;
   }
   return true;
+}
+
+static void archiveCurrentFlight() {
+  if (metadata.flightCounter == 0) {
+    return;
+  }
+  if (metadata.currentWriteAddr <= metadata.currentFileStartAddr) {
+    return;
+  }
+
+  if (metadata.numFlights < MAX_FLIGHT_INDEX) {
+    metadata.flightIndex[metadata.numFlights].flightNumber = metadata.flightCounter;
+    metadata.flightIndex[metadata.numFlights].startAddr = metadata.currentFileStartAddr;
+    metadata.flightIndex[metadata.numFlights].endAddr = metadata.currentWriteAddr;
+    metadata.numFlights++;
+    logPrint(INFO, "Archived flight #%lu to index (%lu flights total)",
+             (unsigned long)metadata.flightCounter,
+             (unsigned long)metadata.numFlights);
+  } else {
+    logPrint(WARNING, "Flight index full, oldest flight will be lost");
+  }
 }
 
 static void resetBufferState() {

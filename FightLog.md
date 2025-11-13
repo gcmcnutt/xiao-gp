@@ -8,9 +8,10 @@
 - Use onboard QSPI flash to log flight data
 - Write data as close to real time as possible with async flushing
 - Call `flush_check()` at end of each `loop()` iteration to flush pending data ASAP (critical for crash recovery)
-- Pre-flight preparation: Create new numbered log file on each startup (flight_001.txt, flight_002.txt, etc.)
+- Each arming event opens a fresh numbered log file (`flight_001.txt`, `flight_002.txt`, etc.); disarm finalizes the previous flight
 - If flash becomes full during logging, skip logging remainder of flight
-- Enable BLE connectivity when system detects INAV is disarmed
+- Flash logging is paused whenever INAV reports DISARMED (failsafe while still armed keeps recording)
+- BLE advertising is disabled while armed and re-enabled on disarm to prevent inflight connections
 
 ### What can we do via the BLE interface?
 - Establish connection from remote computer or phone via Bluetooth Low Energy
@@ -32,7 +33,7 @@
 - **Synchronous operations**: All QSPI read/write/erase calls wait for completion via `nrfx_qspi_mem_busy_check()`
 - **Block-based storage** with metadata block (4KB at addr 0x0000)
 - **Flight index system** tracks up to 100 flights with start/end addresses
-- **File naming**: `flight_NNN.txt` where NNN increments on each boot
+- **File naming**: `flight_NNN.txt` where NNN increments on each arm event
 - **Metadata persisted** in flash block 0, includes flight counter and file index
 - **Auto-erase on first boot**: Detects uninitialized flash, requires manual erase via BLE
 - **Automatic reboot** after erase to ensure clean state
@@ -49,7 +50,7 @@
 #### BLE Interface (GATT Services) - ✅ IMPLEMENTED
 - **Service UUID**: `F1706000-1234-5678-9ABC-DEF012345678`
 - **Three characteristics**:
-  - **Control** (`F1706001-...`): Write commands (LIST, DL:filename, NEXT, ERASE:ALL, REBOOT)
+  - **Control** (`F1706001-...`): Write commands (LIST, DL:filename, NEXT, ERASE:ALL)
   - **Data** (`F1706002-...`): Notify with 128-byte chunks during download
   - **Status** (`F1706003-...`): Notify with progress/status messages
 - **Request/response flow control**: Browser requests each chunk individually via "NEXT" command
@@ -57,7 +58,6 @@
   - `LIST` → `CURRENT:num` → `FILE:name:size` (multiple) → `LIST_DONE`
   - `DL:filename` → `READY:size:chunksize` → browser sends `NEXT` → device sends chunk → repeat
   - `ERASE:ALL` → `ERASING` → (erase + auto-reboot) → `ERASE_DONE`
-  - `REBOOT` → `REBOOT` (status) → auto-reboot
 - **Chunk size**: 128 bytes (optimized for BLE reliability)
 - **No auto-streaming**: Device only sends when browser requests (prevents packet loss)
 - **Non-blocking reboot**: 500ms delay allows BLE to send status before reset
@@ -70,17 +70,16 @@
   - List all flight logs (newest first, with file sizes)
   - **Current flight indicator**: Shows "[CURRENT - in progress]" on active log
   - Download any log with progress bar (current file disabled)
-  - **Reboot button**: Manually rotate log file (saves current, starts new)
   - Erase all logs with confirmation (triggers auto-reboot)
 - **Flow-controlled downloads**: Browser pulls chunks on-demand, no packet loss
 - **Progress tracking**: Shows KB received and percentage complete
 - **Auto-trimming**: Removes trailing null padding (max 512 bytes)
 
-#### Flight Detection - ⚠️ TODO
-- Monitor INAV arming state via MSP link
-- Disable BLE advertising when armed (flight mode)
-- Enable BLE advertising when disarmed (download mode)
-- **Current status**: BLE always enabled
+#### Flight Detection - ✅ UPDATED
+- MSP `ARM` flag gates flash logging and BLE availability
+- Transition to ARMED opens a new log file, pauses BLE advertising, and resumes flash writes
+- Disarm flushes and archives the current log, then re-enables BLE for downloads
+- Failsafe events keep logging active as long as INAV stays armed; intentional disarms stop writes immediately
 
 #### Error Handling - ✅ IMPLEMENTED
 - **Flash full**: Sets flag, stops logging, continues flight controller operation
@@ -93,7 +92,7 @@
 
 ### Working Features ✅
 - Flash logging with triple 4KB buffers and non-blocking flush state machine
-- Flight counter increments on each boot
+- Flight counter increments on each arming event
 - Flight index tracks up to 100 flights
 - BLE GATT service for file operations
 - Web Bluetooth interface for downloads
@@ -103,17 +102,18 @@
 
 ### Known Issues 🐛
 1. **Downloads may be slow** - 128 byte chunks with request/response adds latency
-2. **BLE always enabled** - needs integration with INAV arming state
+2. **Need flight testing** - exercise repeated arm/disarm cycles to confirm automatic log rotation and BLE gating behave as expected
 
 ### Recent Fixes ✅
+- **Arm-driven logging** - flash writes now start on INAV arm, stop on disarm, and automatically rotate files while disabling BLE inflight
 - **Async flush state machine** - Preallocated buffers feed page-program-sized writes while the main loop remains responsive; metadata commits now piggyback on the same scheduler.
 - Fixed download completion trigger (request final chunk after reaching expected size)
 - Implemented non-blocking reboot (500ms delay, allows BLE to send status)
-- Added REBOOT button for manual log rotation
 - Prevent downloading current (in-progress) flight file
 - Send current flight number during LIST to identify active log
 
 ### Testing Needed 🧪
+- [ ] Validate multiple arm/disarm cycles (new file per flight, BLE disabled while armed)
 - [ ] Verify complete file integrity (all bytes received)
 - [ ] Test with multiple flights (3-5 flights)
 - [ ] Verify flash erase + reboot cycle

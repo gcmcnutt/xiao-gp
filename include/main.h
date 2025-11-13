@@ -56,6 +56,7 @@ void ledSetup();
 void heartBeatLED();
 void blueToothSetup();
 void blueToothLoop();
+void blueToothSetEnabled(bool enabled);
 
 // GP rabbit path following functions
 void convertMSPStateToAircraftState(AircraftState& aircraftState);

@@ -35,6 +35,7 @@ static unsigned long lastSendTime = 0;
 // Aircraft state tracking for position/velocity calculation
 static Eigen::Vector3d last_valid_position(0.0, 0.0, 0.0);
 static bool have_valid_position = false;
+static bool was_system_armed = false;
 
 // Safety timeout for single GP test run (60 seconds max per run)
 #define GP_MAX_SINGLE_RUN_MSEC (60 * 1000)
@@ -359,6 +360,25 @@ void mspUpdateState()
   else
   {
     analogWrite(BLUE_PIN, 255);
+  }
+
+  // Manage flash logging and BLE state based on arm transitions
+  if (isArmed != was_system_armed)
+  {
+    if (isArmed)
+    {
+      blueToothSetEnabled(false);
+      if (!flashLoggerBeginFlight())
+      {
+        logPrint(ERROR, "Flash logger failed to start new flight on arm");
+      }
+    }
+    else
+    {
+      flashLoggerEndFlight();
+      blueToothSetEnabled(true);
+    }
+    was_system_armed = isArmed;
   }
 
   // then, check the servo channel to see if can auto-enable

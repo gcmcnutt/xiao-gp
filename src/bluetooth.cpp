@@ -20,6 +20,7 @@ BLEStringCharacteristic statusCharacteristic("F1706003-1234-5678-9ABC-DEF0123456
 // File transfer state
 static uint8_t transferBuffer[FLASH_LOGGER_CHUNK_SIZE];
 static bool transferInProgress = false;
+static bool bluetoothEnabled = true;
 
 // Reboot state for non-blocking reboot after erase
 static unsigned long rebootScheduledTime = 0;
@@ -63,6 +64,28 @@ void blueToothSetup()
   BLE.advertise();
 
   logPrint(INFO, "BLE Peripheral (LED + FlightLogger)");
+}
+
+void blueToothSetEnabled(bool enabled)
+{
+  if (enabled == bluetoothEnabled) {
+    return;
+  }
+
+  bluetoothEnabled = enabled;
+
+  if (enabled) {
+    BLE.advertise();
+    logPrint(INFO, "BLE advertising enabled");
+  } else {
+    BLE.stopAdvertise();
+    BLEDevice central = BLE.central();
+    if (central && central.connected()) {
+      logPrint(INFO, "BLE disconnecting active central due to arm state");
+      central.disconnect();
+    }
+    logPrint(INFO, "BLE advertising disabled");
+  }
 }
 
 // Forward declaration
@@ -150,14 +173,6 @@ static void processLoggerCommand(const char* cmd) {
     flashLoggerErase();
     statusCharacteristic.writeValue("ERASE_DONE");
     logPrint(INFO, "Erase complete, rebooting in 500ms...");
-    // Schedule non-blocking reboot
-    rebootScheduledTime = millis() + 500;
-    rebootScheduled = true;
-
-  } else if (strncmp(cmd, "REBOOT", 6) == 0) {
-    // Reboot device to rotate log file
-    statusCharacteristic.writeValue("REBOOT");
-    logPrint(INFO, "Rebooting via BLE in 500ms...");
     // Schedule non-blocking reboot
     rebootScheduledTime = millis() + 500;
     rebootScheduled = true;

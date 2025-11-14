@@ -259,6 +259,7 @@ struct msp_attitude_t {
 
 // MSP2_INAV_LOCAL_STATE reply
 struct msp_local_state_t {
+  uint32_t timestamp_us; // microseconds since boot (for blackbox correlation)
   int32_t pos[3]; // cm in NEU frame
   int32_t vel[3]; // cm/s in NEU frame
   float q[4];     // quaternion (w,x,y,z) body->NEU

@@ -81,19 +81,37 @@ static Eigen::Vector3d neuVectorToNedMeters(const int32_t vec_cm[3])
 
 static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
 {
-  Eigen::Quaterniond q_neu(q[0], q[1], q[2], q[3]);
+  // INAV provides quaternion in NEU frame: Earth(NEU)→Body
+  // Need to convert to NED frame: Earth(NED)→Body
+  //
+  // NEU→NED frame transformation:
+  //   X (North) → X (North)  - unchanged
+  //   Y (East)  → -Z (Down)  - becomes negative Z
+  //   Z (Up)    → Y (East)   - becomes Y
+  //
+  // For quaternion representing rotation from Earth to Body,
+  // we transform the quaternion components to match the new frame:
+  //   qw stays qw (scalar part unchanged)
+  //   qx stays qx (North axis unchanged)
+  //   qy_ned = qz_neu  (East from Up)
+  //   qz_ned = -qy_neu (Down from -East)
+
+  Eigen::Quaterniond q_neu(q[0], q[1], q[2], q[3]);  // w, x, y, z
+
   if (q_neu.norm() == 0.0) {
     return Eigen::Quaterniond::Identity();
   }
   q_neu.normalize();
-  
-  // NEU→NED: 180° rotation around X-axis (North axis)
-  Eigen::Quaterniond q_neu_to_ned(0.0, 1.0, 0.0, 0.0);
-  
-  // Transform: Earth(NED)→Body = (NEU→NED) * Earth(NEU)→Body
-  Eigen::Quaterniond q_ned = q_neu_to_ned * q_neu;
+
+  // Apply component transformation for NEU→NED frame change
+  Eigen::Quaterniond q_ned(
+    q_neu.w(),   // w unchanged
+    q_neu.x(),   // x (North) unchanged
+    q_neu.z(),   // y_ned ← z_neu (East from Up)
+    -q_neu.y()   // z_ned ← -y_neu (Down from -East)
+  );
+
   q_ned.normalize();
-  
   return q_ned;
 }
 
@@ -195,7 +213,7 @@ void logGPState()
   // Get state flags
   bool armed = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_ARM);
   bool failsafe = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_FAILSAFE);
-  
+
   bool hasServoActivation = state.rc_valid && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD;
 
   logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s servo=%s autoc=%s rabbit=%s time=%lums",
@@ -283,15 +301,33 @@ static void mspUpdateGPControl()
     double debug_getdphi = evaluateGPOperator(9, pathProvider, aircraft_state, debug_args, 1, 0.0);     // GETDPHI opcode = 9
     double debug_getalpha = evaluateGPOperator(18, pathProvider, aircraft_state, debug_args, 1, 0.0);   // GETALPHA opcode = 18
     double debug_getdtarget = evaluateGPOperator(11, pathProvider, aircraft_state, debug_args, 1, 0.0); // GETDTARGET opcode = 11
-    
-    logPrint(DEBUG, "DEBUG GP: world_vec=[%.1f,%.1f,%.1f] body_vec=[%.1f,%.1f,%.1f] theta=%.3f phi=%.3f alpha=%.3f dtarget=%.3f", 
+    double debug_getbeta = evaluateGPOperator(19, pathProvider, aircraft_state, debug_args, 1, 0.0);    // GETBETA opcode = 19
+    double debug_getdhome = evaluateGPOperator(15, pathProvider, aircraft_state, debug_args, 1, 0.0);   // GETDHOME opcode = 15
+
+    // Calculate body-frame velocity for detailed logging
+    Eigen::Vector3d velocity_body = aircraft_state.getOrientation().inverse() * aircraft_state.getVelocity();
+
+    // Get raw quaternion
+    Eigen::Quaterniond q = aircraft_state.getOrientation();
+
+    logPrint(INFO, "DEBUG GP: world_vec=[%.1f,%.1f,%.1f] body_vec=[%.1f,%.1f,%.1f] theta=%.3f phi=%.3f alpha=%.3f dtarget=%.3f",
              craftToTarget.x(), craftToTarget.y(), craftToTarget.z(),
              target_local.x(), target_local.y(), target_local.z(),
              debug_getdtheta, debug_getdphi, debug_getalpha, debug_getdtarget);
-    
+
+    // NEW: Detailed GP sensor logging for frame convention verification
+    logPrint(INFO, "GP SENSORS: quat=[%.4f,%.4f,%.4f,%.4f] vbody=[%.2f,%.2f,%.2f] alpha=%.2f beta=%.2f dtheta=%.2f dphi=%.2f dhome=%.2f",
+             q.w(), q.x(), q.y(), q.z(),
+             velocity_body.x(), velocity_body.y(), velocity_body.z(),
+             debug_getalpha * 180.0 / M_PI,      // Convert radians to degrees
+             debug_getbeta * 180.0 / M_PI,
+             debug_getdtheta * 180.0 / M_PI,
+             debug_getdphi * 180.0 / M_PI,
+             debug_getdhome);
+
     // DEBUG: Check if path is advancing and distance increasing
-    logPrint(DEBUG, "DEBUG RABBIT: idx=%d, elapsed=%lums, target_y=%.1f, craft_y=%.1f, dist=%.1f", 
-             current_path_index, elapsed_msec, gp_path_segment.start.y(), 
+    logPrint(INFO, "DEBUG RABBIT: idx=%d, elapsed=%lums, target_y=%.1f, craft_y=%.1f, dist=%.1f",
+             current_path_index, elapsed_msec, gp_path_segment.start.y(),
              aircraft_state.getPosition().y(), debug_distance);
     
     generatedGPProgram(pathProvider, aircraft_state, 0.0);
@@ -337,6 +373,11 @@ void mspUpdateState()
 
   // Local state (position / velocity / quaternion)
   state.local_state_valid = msp.request(MSP2_INAV_LOCAL_STATE, &state.local_state, sizeof(state.local_state));
+  if (state.local_state_valid)
+  {
+    // Convert INAV timestamp from microseconds to milliseconds
+    state.inavSampleTimeMsec = state.local_state.timestamp_us / 1000;
+  }
   // Local state already provides quaternion data; if unavailable, orientation will be held from previous sample
   if (!state.local_state_valid && (state.autoc_enabled || rabbit_active))
   {

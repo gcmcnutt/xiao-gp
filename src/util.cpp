@@ -55,10 +55,10 @@ void logPrint(LogLevel level, const char* format, ...) {
   // Get current time in milliseconds
   unsigned long timestamp = millis();
 
-  // Create prefix with timestamp and level
-  char prefix[32];
+  // Create prefix with timestamp, INAV sample time, and level
+  char prefix[48];
   const char* levelStr;
-  
+
   switch(level) {
       case DEBUG:   levelStr = "d";   break;
       case INFO:    levelStr = "i";    break;
@@ -67,7 +67,7 @@ void logPrint(LogLevel level, const char* format, ...) {
       default:      levelStr = "?"; break;
   }
 
-  snprintf(prefix, sizeof(prefix), "%07lu %s ", timestamp, levelStr);
+  snprintf(prefix, sizeof(prefix), "%07lu %07lu %s ", timestamp, state.inavSampleTimeMsec, levelStr);
 
   // Handle the variable arguments
   va_list args;
@@ -75,9 +75,9 @@ void logPrint(LogLevel level, const char* format, ...) {
   
   // First print to buffer
   vsnprintf(logBuffer, sizeof(logBuffer), format, args);
-  
+
   // Combine prefix and message for flash/Serial output
-  char flashBuffer[544]; // prefix(32) + logBuffer(512)
+  char flashBuffer[560]; // prefix(48) + logBuffer(512)
   snprintf(flashBuffer, sizeof(flashBuffer), "%s%s", prefix, logBuffer);
 
   // Write to flash logger and get monotonic message ID

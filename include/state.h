@@ -16,6 +16,7 @@ public:
     altitude_valid = false;
     waypoint_valid = false;
     local_state_valid = false;
+    inavSampleTimeMsec = 0;
   }
 
   void setAsOfMsec(unsigned long asOfMsec)
@@ -24,6 +25,7 @@ public:
   }
 
   unsigned long asOfMsec; // TODO we probably should store an asOf for each element
+  unsigned long inavSampleTimeMsec; // INAV's timestamp in msec (from timestamp_us / 1000)
   bool status_valid;
   bool rc_valid;
   bool altitude_valid;

@@ -81,38 +81,15 @@ static Eigen::Vector3d neuVectorToNedMeters(const int32_t vec_cm[3])
 
 static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
 {
-  // INAV provides quaternion in NEU frame: Earth(NEU)→Body
-  // Need to convert to NED frame: Earth(NED)→Body
-  //
-  // NEU→NED frame transformation:
-  //   X (North) → X (North)  - unchanged
-  //   Y (East)  → -Z (Down)  - becomes negative Z
-  //   Z (Up)    → Y (East)   - becomes Y
-  //
-  // For quaternion representing rotation from Earth to Body,
-  // we transform the quaternion components to match the new frame:
-  //   qw stays qw (scalar part unchanged)
-  //   qx stays qx (North axis unchanged)
-  //   qy_ned = qz_neu  (East from Up)
-  //   qz_ned = -qy_neu (Down from -East)
-
-  Eigen::Quaterniond q_neu(q[0], q[1], q[2], q[3]);  // w, x, y, z
-
-  if (q_neu.norm() == 0.0) {
+  // INAV reports attitude as a unit quaternion in the NED earth frame (North-East-Down).
+  // No additional axis swapping is required—normalize and pass it through.
+  Eigen::Quaterniond attitude(q[0], q[1], q[2], q[3]);
+  if (attitude.norm() == 0.0)
+  {
     return Eigen::Quaterniond::Identity();
   }
-  q_neu.normalize();
-
-  // Apply component transformation for NEU→NED frame change
-  Eigen::Quaterniond q_ned(
-    q_neu.w(),   // w unchanged
-    q_neu.x(),   // x (North) unchanged
-    q_neu.z(),   // y_ned ← z_neu (East from Up)
-    -q_neu.y()   // z_ned ← -y_neu (Down from -East)
-  );
-
-  q_ned.normalize();
-  return q_ned;
+  attitude.normalize();
+  return attitude;
 }
 
 // Unified GP State logging function

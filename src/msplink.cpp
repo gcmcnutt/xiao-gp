@@ -266,20 +266,19 @@ static void mspUpdateGPControl()
     SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
     
     // DEBUG: Manual GETDTHETA and GETDPHI evaluation with coordinate details
-    double debug_args[1] = {0.0}; // offset arg = 0
     double debug_distance = (gp_path_segment.start - aircraft_state.getPosition()).norm();
-    
+
     // Calculate craft-to-target vector in world frame
     Eigen::Vector3d craftToTarget = gp_path_segment.start - aircraft_state.getPosition();
     // Transform to body frame
     Eigen::Vector3d target_local = aircraft_state.getOrientation().inverse() * craftToTarget;
-    
-    double debug_getdtheta = evaluateGPOperator(10, pathProvider, aircraft_state, debug_args, 1, 0.0);  // GETDTHETA opcode = 10
-    double debug_getdphi = evaluateGPOperator(9, pathProvider, aircraft_state, debug_args, 1, 0.0);     // GETDPHI opcode = 9
-    double debug_getalpha = evaluateGPOperator(18, pathProvider, aircraft_state, debug_args, 1, 0.0);   // GETALPHA opcode = 18
-    double debug_getdtarget = evaluateGPOperator(11, pathProvider, aircraft_state, debug_args, 1, 0.0); // GETDTARGET opcode = 11
-    double debug_getbeta = evaluateGPOperator(19, pathProvider, aircraft_state, debug_args, 1, 0.0);    // GETBETA opcode = 19
-    double debug_getdhome = evaluateGPOperator(15, pathProvider, aircraft_state, debug_args, 1, 0.0);   // GETDHOME opcode = 15
+
+    double debug_getdtheta = evaluateGPOperator(GETDTHETA, pathProvider, aircraft_state, nullptr, 0, 0.0);
+    double debug_getdphi = evaluateGPOperator(GETDPHI, pathProvider, aircraft_state, nullptr, 0, 0.0);
+    double debug_getalpha = evaluateGPOperator(GETALPHA, pathProvider, aircraft_state, nullptr, 0, 0.0);
+    double debug_getdtarget = evaluateGPOperator(GETDTARGET, pathProvider, aircraft_state, nullptr, 0, 0.0);
+    double debug_getbeta = evaluateGPOperator(GETBETA, pathProvider, aircraft_state, nullptr, 0, 0.0);
+    double debug_getdhome = evaluateGPOperator(GETDHOME, pathProvider, aircraft_state, nullptr, 0, 0.0);
 
     // Calculate body-frame velocity for detailed logging
     Eigen::Vector3d velocity_body = aircraft_state.getOrientation().inverse() * aircraft_state.getVelocity();

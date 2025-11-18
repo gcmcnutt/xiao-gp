@@ -193,11 +193,10 @@ void logGPState()
 
   bool hasServoActivation = state.rc_valid && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD;
 
-  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s servo=%s autoc=%s rabbit=%s time=%lums",
+  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s servo=%s autoc=%s rabbit=%s",
            pos_str.c_str(), vel_str.c_str(), att_str.c_str(), quat_str.c_str(), relvel_str.c_str(),
            armed ? "Y" : "N", failsafe ? "Y" : "N", hasServoActivation ? "Y" : "N", state.autoc_enabled ? "Y" : "N",
-           rabbit_active ? "Y" : "N",
-           time_val);
+           rabbit_active ? "Y" : "N");
 }
 
 static void mspUpdateGPControl()
@@ -313,9 +312,9 @@ static void mspUpdateGPControl()
     cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
     cached_throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
 
-    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d setRcData=[%d,%d,%d] time=%lums",
+    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d setRcData=[%d,%d,%d]",
              gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
-             current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd, elapsed_msec);
+             current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd);
   }
 }
 

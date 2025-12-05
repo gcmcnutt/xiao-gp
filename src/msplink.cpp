@@ -3,8 +3,10 @@
 #include <embedded_pathgen.h>
 #include <GP/autoc/gp_evaluator_embedded.h>
 #include <gp_program.h>
+#include <mbed.h>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 
 MSP msp;
 
@@ -22,15 +24,36 @@ static bool path_origin_set = false;
 
 // GP Control Timing and State
 static unsigned long rabbit_start_time = 0;
-static bool rabbit_active = false;
+static volatile bool rabbit_active = false;
 static int current_path_index = 0;
 static bool servo_reset_required = false;
 
-// MSP Control Output Caching
-static int cached_roll_cmd = MSP_DEFAULT_CHANNEL_VALUE;
-static int cached_pitch_cmd = MSP_DEFAULT_CHANNEL_VALUE;
-static int cached_throttle_cmd = MSP_DEFAULT_CHANNEL_VALUE;
-static unsigned long lastSendTime = 0;
+// MSP Control Output Caching and scheduling
+static volatile int cached_roll_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+static volatile int cached_pitch_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+static volatile int cached_throttle_cmd = MSP_DEFAULT_CHANNEL_VALUE;
+static volatile uint32_t cached_cmd_sequence = 0;
+static volatile uint32_t cached_eval_start_us = 0;
+static volatile uint32_t cached_eval_complete_us = 0;
+static volatile bool mspBusLocked = false;
+static volatile bool mspSendPending = false;
+static mbed::Ticker mspSendTicker;
+static bool mspSendTickerRunning = false;
+
+#define MSP_SEND_LOG_CAPACITY 256
+struct MspSendLogEntry
+{
+  uint32_t sendTimeUs;
+  uint32_t evalStartUs;
+  uint32_t evalEndUs;
+  uint32_t sequence;
+  bool sequenceChanged;
+};
+static MspSendLogEntry mspSendLog[MSP_SEND_LOG_CAPACITY];
+static volatile uint16_t mspSendLogWriteIndex = 0;
+static volatile uint16_t mspSendLogReadIndex = 0;
+static volatile uint16_t mspSendLogCount = 0;
+static volatile uint32_t lastLoggedSequenceForStats = 0;
 
 // Aircraft state tracking for position/velocity calculation
 static Eigen::Vector3d last_valid_position(0.0, 0.0, 0.0);
@@ -39,6 +62,25 @@ static bool was_system_armed = false;
 
 // Safety timeout for single GP test run (60 seconds max per run)
 #define GP_MAX_SINGLE_RUN_MSEC (60 * 1000)
+#define MSP_BUS_LOCK_TIMEOUT_USEC (MSP_REPLY_TIMEOUT_MSEC * 2000UL)
+
+// Forward declarations for MSP scheduling helpers
+static void updateCachedCommands(int roll, int pitch, int throttle, uint32_t evalStartUs);
+static bool tryLockMspBusFromTask();
+static bool lockMspBusBlockingFromTask();
+static bool releaseMspBusFromTask();
+static void servicePendingMspSendFromTask();
+static void attemptImmediateMspSendFromTask();
+static bool performMspRequest(uint16_t command, void *buffer, size_t size);
+static bool tryLockMspBusFromIsr();
+static void unlockMspBusFromIsr();
+static void performMspSendLocked();
+static void mspSendTimerHandler();
+static void startMspSendTicker();
+static void stopMspSendTicker();
+static void recordMspSendEvent();
+static void resetMspSendStats();
+static void logMspSendStats();
 
 static void resetPositionHistory()
 {
@@ -51,6 +93,7 @@ static void stopAutoc(const char *reason, bool requireServoReset)
   bool wasAutoc = state.autoc_enabled;
   bool wasRabbit = rabbit_active;
   bool latchBefore = servo_reset_required;
+  bool tickerWasRunning = mspSendTickerRunning;
 
   state.autoc_enabled = false;
   rabbit_active = false;
@@ -65,9 +108,19 @@ static void stopAutoc(const char *reason, bool requireServoReset)
     servo_reset_required = true;
   }
 
+  if (tickerWasRunning)
+  {
+    stopMspSendTicker();
+  }
+
   if (wasAutoc || wasRabbit || (requireServoReset && !latchBefore))
   {
     logPrint(INFO, "GP Control: Autoc disabled (%s) - pilot has control", reason);
+  }
+
+  if (wasRabbit)
+  {
+    logMspSendStats();
   }
 }
 
@@ -263,6 +316,7 @@ static void mspUpdateGPControl()
 
     // Call generated GP program directly (aircraft_state is updated continuously in mspUpdateState)
     SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
+    uint32_t eval_start_us = micros();
     
     // DEBUG: Manual GETDTHETA and GETDPHI evaluation with coordinate details
     double debug_distance = (gp_path_segment.start - aircraft_state.getPosition()).norm();
@@ -308,13 +362,14 @@ static void mspUpdateGPControl()
     generatedGPProgram(pathProvider, aircraft_state, 0.0);
 
     // Convert GP-controlled aircraft commands to MSP RC values and cache them
-    cached_roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
-    cached_pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
-    cached_throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
+    int roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
+    int pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
+    int throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
+    updateCachedCommands(roll_cmd, pitch_cmd, throttle_cmd, eval_start_us);
 
     logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d setRcData=[%d,%d,%d]",
              gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
-             current_path_index, cached_roll_cmd, cached_pitch_cmd, cached_throttle_cmd);
+             current_path_index, roll_cmd, pitch_cmd, throttle_cmd);
   }
 }
 
@@ -330,6 +385,10 @@ void msplinkSetup()
   {
     state.command_buffer.channel[i] = MSP_DEFAULT_CHANNEL_VALUE;
   }
+
+  // Start periodic MSP send timer
+  startMspSendTicker();
+  resetMspSendStats();
 }
 
 void mspUpdateState()
@@ -338,7 +397,7 @@ void mspUpdateState()
   state.setAsOfMsec(millis());
 
   // get status
-  state.status_valid = msp.request(MSP_STATUS, &state.status, sizeof(state.status));
+  state.status_valid = performMspRequest(MSP_STATUS, &state.status, sizeof(state.status));
   if (!state.status_valid)
   {
     stopAutoc("MSP status failure", true);
@@ -347,7 +406,7 @@ void mspUpdateState()
   }
 
   // Local state (position / velocity / quaternion)
-  state.local_state_valid = msp.request(MSP2_INAV_LOCAL_STATE, &state.local_state, sizeof(state.local_state));
+  state.local_state_valid = performMspRequest(MSP2_INAV_LOCAL_STATE, &state.local_state, sizeof(state.local_state));
   if (state.local_state_valid)
   {
     // Convert INAV timestamp from microseconds to milliseconds
@@ -360,7 +419,7 @@ void mspUpdateState()
   }
 
   // RC channels
-  state.rc_valid = msp.request(MSP_RC, &state.rc, sizeof(state.rc));
+  state.rc_valid = performMspRequest(MSP_RC, &state.rc, sizeof(state.rc));
   if (!state.rc_valid && (state.autoc_enabled || rabbit_active))
   {
     stopAutoc("MSP RC failure", true);
@@ -449,6 +508,8 @@ void mspUpdateState()
 
       rabbit_start_time = millis();
       rabbit_active = true;
+      resetMspSendStats();
+      startMspSendTicker();
       current_path_index = 0;
 
       state.autoc_enabled = true;
@@ -496,17 +557,307 @@ void mspUpdateState()
 
 void mspSetControls()
 {
-  // Only send GP commands when rabbit is active - otherwise let user have control
-  if (rabbit_active && millis() - lastSendTime >= MSP_SEND_INTERVAL_MSEC)
-  {
-    lastSendTime = millis();
+  attemptImmediateMspSendFromTask();
+}
 
-    // Send cached GP commands
-    state.command_buffer.channel[0] = cached_roll_cmd;     // Roll
-    state.command_buffer.channel[1] = cached_pitch_cmd;    // Pitch
-    state.command_buffer.channel[2] = cached_throttle_cmd; // Throttle
-    msp.send(MSP_SET_RAW_RC, &state.command_buffer, sizeof(state.command_buffer));
+static void updateCachedCommands(int roll, int pitch, int throttle, uint32_t evalStartUs)
+{
+  uint32_t evalEndUs = micros();
+  noInterrupts();
+  cached_roll_cmd = roll;
+  cached_pitch_cmd = pitch;
+  cached_throttle_cmd = throttle;
+  cached_eval_start_us = evalStartUs;
+  cached_eval_complete_us = evalEndUs;
+  cached_cmd_sequence++;
+  interrupts();
+}
+
+static bool tryLockMspBusFromTask()
+{
+  bool locked = false;
+  noInterrupts();
+  if (!mspBusLocked)
+  {
+    mspBusLocked = true;
+    locked = true;
   }
+  interrupts();
+  return locked;
+}
+
+static bool lockMspBusBlockingFromTask()
+{
+  unsigned long start = micros();
+  while (!tryLockMspBusFromTask())
+  {
+    if (micros() - start >= MSP_BUS_LOCK_TIMEOUT_USEC)
+    {
+      logPrint(ERROR, "MSP bus lock timeout - MSP command %s", state.autoc_enabled ? "during autoc" : "idle");
+      return false;
+    }
+    delayMicroseconds(50);
+  }
+  return true;
+}
+
+static bool releaseMspBusFromTask()
+{
+  bool pendingSend = false;
+  noInterrupts();
+  mspBusLocked = false;
+  pendingSend = mspSendPending;
+  mspSendPending = false;
+  interrupts();
+  return pendingSend;
+}
+
+static void servicePendingMspSendFromTask()
+{
+  while (rabbit_active)
+  {
+    if (!tryLockMspBusFromTask())
+    {
+      noInterrupts();
+      mspSendPending = true;
+      interrupts();
+      return;
+    }
+
+    performMspSendLocked();
+    bool morePending = releaseMspBusFromTask();
+    if (!morePending)
+    {
+      return;
+    }
+  }
+}
+
+static void attemptImmediateMspSendFromTask()
+{
+  if (!rabbit_active)
+  {
+    return;
+  }
+
+  if (!tryLockMspBusFromTask())
+  {
+    noInterrupts();
+    mspSendPending = true;
+    interrupts();
+    return;
+  }
+
+  performMspSendLocked();
+  bool pending = releaseMspBusFromTask();
+  if (pending)
+  {
+    servicePendingMspSendFromTask();
+  }
+}
+
+static bool performMspRequest(uint16_t command, void *buffer, size_t size)
+{
+  if (!lockMspBusBlockingFromTask())
+  {
+    return false;
+  }
+  bool success = msp.request(command, buffer, size);
+  bool pending = releaseMspBusFromTask();
+  if (pending)
+  {
+    servicePendingMspSendFromTask();
+  }
+  return success;
+}
+
+static bool tryLockMspBusFromIsr()
+{
+  if (mspBusLocked)
+  {
+    return false;
+  }
+  mspBusLocked = true;
+  return true;
+}
+
+static void unlockMspBusFromIsr()
+{
+  mspBusLocked = false;
+}
+
+static void performMspSendLocked()
+{
+  state.command_buffer.channel[0] = cached_roll_cmd;
+  state.command_buffer.channel[1] = cached_pitch_cmd;
+  state.command_buffer.channel[2] = cached_throttle_cmd;
+  msp.send(MSP_SET_RAW_RC, &state.command_buffer, sizeof(state.command_buffer));
+  recordMspSendEvent();
+}
+
+static void mspSendTimerHandler()
+{
+  if (!rabbit_active)
+  {
+    return;
+  }
+
+  if (!tryLockMspBusFromIsr())
+  {
+    mspSendPending = true;
+    return;
+  }
+
+  performMspSendLocked();
+  unlockMspBusFromIsr();
+}
+
+static void recordMspSendEvent()
+{
+  if (!rabbit_active)
+  {
+    return;
+  }
+
+  uint32_t sendTime = micros();
+  noInterrupts();
+  uint32_t sequence = cached_cmd_sequence;
+  uint32_t evalStart = cached_eval_start_us;
+  uint32_t evalEnd = cached_eval_complete_us;
+  bool sequenceChanged = sequence != lastLoggedSequenceForStats;
+  lastLoggedSequenceForStats = sequence;
+
+  uint16_t idx = mspSendLogWriteIndex;
+  mspSendLog[idx].sendTimeUs = sendTime;
+  mspSendLog[idx].evalStartUs = evalStart;
+  mspSendLog[idx].evalEndUs = evalEnd;
+  mspSendLog[idx].sequence = sequence;
+  mspSendLog[idx].sequenceChanged = sequenceChanged;
+
+  mspSendLogWriteIndex = (idx + 1) % MSP_SEND_LOG_CAPACITY;
+  if (mspSendLogCount < MSP_SEND_LOG_CAPACITY)
+  {
+    mspSendLogCount++;
+  }
+  else
+  {
+    mspSendLogReadIndex = (mspSendLogReadIndex + 1) % MSP_SEND_LOG_CAPACITY;
+  }
+  interrupts();
+}
+
+static void resetMspSendStats()
+{
+  noInterrupts();
+  mspSendLogWriteIndex = 0;
+  mspSendLogReadIndex = 0;
+  mspSendLogCount = 0;
+  lastLoggedSequenceForStats = cached_cmd_sequence;
+  interrupts();
+}
+
+static void logMspSendStats()
+{
+  uint16_t count;
+  uint16_t readIdx;
+  noInterrupts();
+  count = mspSendLogCount;
+  readIdx = mspSendLogReadIndex;
+  interrupts();
+
+  if (count == 0)
+  {
+    logPrint(INFO, "MSP TX stats: no transmissions recorded");
+    return;
+  }
+
+  double intervalSumMs = 0.0;
+  double intervalMinMs = 1e9;
+  double intervalMaxMs = 0.0;
+  uint32_t intervalCount = 0;
+  uint32_t lateIntervals = 0;
+  const uint32_t desiredIntervalUs = MSP_SEND_INTERVAL_MSEC * 1000UL;
+  const uint32_t lateThresholdUs = desiredIntervalUs + 20000UL; // allow 20ms slack (70ms total)
+
+  double latencyStartSumMs = 0.0;
+  double latencyEndSumMs = 0.0;
+  double latencyStartMinMs = 1e9;
+  double latencyStartMaxMs = 0.0;
+  double latencyEndMinMs = 1e9;
+  double latencyEndMaxMs = 0.0;
+  uint32_t latencySamples = 0;
+
+  uint32_t prevSend = 0;
+
+  for (uint16_t i = 0; i < count; ++i)
+  {
+    uint16_t idx = (readIdx + i) % MSP_SEND_LOG_CAPACITY;
+    const MspSendLogEntry &entry = mspSendLog[idx];
+
+    if (i > 0)
+    {
+      uint32_t delta = entry.sendTimeUs - prevSend;
+      double deltaMs = delta / 1000.0;
+      intervalSumMs += deltaMs;
+      intervalMinMs = std::min(intervalMinMs, deltaMs);
+      intervalMaxMs = std::max(intervalMaxMs, deltaMs);
+      intervalCount++;
+      if (delta > lateThresholdUs)
+      {
+        lateIntervals++;
+      }
+    }
+    prevSend = entry.sendTimeUs;
+
+    if (entry.sequenceChanged && entry.evalStartUs != 0 && entry.evalEndUs != 0)
+    {
+      double startLatencyMs = (entry.sendTimeUs - entry.evalStartUs) / 1000.0;
+      double endLatencyMs = (entry.sendTimeUs - entry.evalEndUs) / 1000.0;
+      latencyStartSumMs += startLatencyMs;
+      latencyEndSumMs += endLatencyMs;
+      latencyStartMinMs = std::min(latencyStartMinMs, startLatencyMs);
+      latencyStartMaxMs = std::max(latencyStartMaxMs, startLatencyMs);
+      latencyEndMinMs = std::min(latencyEndMinMs, endLatencyMs);
+      latencyEndMaxMs = std::max(latencyEndMaxMs, endLatencyMs);
+      latencySamples++;
+    }
+  }
+
+  double intervalAvgMs = intervalCount ? intervalSumMs / intervalCount : 0.0;
+  if (intervalCount == 0)
+  {
+    intervalMinMs = 0.0;
+  }
+
+  logPrint(INFO,
+           "MSP TX stats: sends=%u intervals(ms) min=%.1f avg=%.1f max=%.1f late>%ums=%u",
+           count,
+           intervalMinMs,
+           intervalAvgMs,
+           intervalMaxMs,
+           (int)(lateThresholdUs / 1000),
+           lateIntervals);
+
+  if (latencySamples > 0)
+  {
+    double latencyStartAvgMs = latencyStartSumMs / latencySamples;
+    double latencyEndAvgMs = latencyEndSumMs / latencySamples;
+    logPrint(INFO,
+             "MSP latency: samples=%u start(ms) min=%.1f avg=%.1f max=%.1f end(ms) min=%.1f avg=%.1f max=%.1f",
+             latencySamples,
+             latencyStartMinMs,
+             latencyStartAvgMs,
+             latencyStartMaxMs,
+             latencyEndMinMs,
+             latencyEndAvgMs,
+             latencyEndMaxMs);
+  }
+  else
+  {
+    logPrint(INFO, "MSP latency: no GP evaluations recorded");
+  }
+
+  resetMspSendStats();
 }
 
 // Convert MSP state data to AircraftState for GP evaluator
@@ -584,4 +935,58 @@ int convertThrottleToMSPChannel(double gp_command)
   // Throttle: GP +1.0 = full throttle = MSP 2000 (DIRECT mapping)
   double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
   return (int)(1500.0 + clamped * 500.0);
+}
+static void startMspSendTicker()
+{
+  noInterrupts();
+  if (!mspSendTickerRunning)
+  {
+    mspSendTicker.attach_us(mbed::callback(mspSendTimerHandler), MSP_SEND_INTERVAL_MSEC * 1000);
+    mspSendTickerRunning = true;
+  }
+  interrupts();
+}
+
+static void stopMspSendTicker()
+{
+  bool isrActive = false;
+  noInterrupts();
+  if (mspSendTickerRunning)
+  {
+    mspSendTicker.detach();
+    mspSendTickerRunning = false;
+  }
+  if (mspBusLocked)
+  {
+    isrActive = true;
+  }
+  else
+  {
+    mspBusLocked = true; // prevent ISR from entering while we flush
+  }
+  interrupts();
+
+  if (isrActive)
+  {
+    // Busy-wait until ISR releases the lock (should be very short)
+    while (true)
+    {
+      noInterrupts();
+      bool locked = mspBusLocked;
+      if (!locked)
+      {
+        mspBusLocked = true;
+        interrupts();
+        break;
+      }
+      interrupts();
+      delayMicroseconds(10);
+    }
+  }
+
+  // At this point we own the lock exclusively; safe to disable pending flag
+  noInterrupts();
+  mspSendPending = false;
+  mspBusLocked = false;
+  interrupts();
 }

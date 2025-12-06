@@ -1,5 +1,6 @@
 #include <main.h>
 #include <GP/autoc/aircraft_state.h>
+#include <GP/autoc/fastmath/orientation_math.h>
 #include <embedded_pathgen.h>
 #include <GP/autoc/gp_evaluator_embedded.h>
 #include <gp_program.h>
@@ -227,10 +228,12 @@ void logGPState()
     if (orientation.norm() > 0.0)
     {
       orientation.normalize();
-      Eigen::Vector3d euler = orientation.toRotationMatrix().eulerAngles(2, 1, 0); // yaw, pitch, roll
-      double yaw_deg = euler[0] * 180.0 / M_PI;
-      double pitch_deg = euler[1] * 180.0 / M_PI;
-      double roll_deg = euler[2] * 180.0 / M_PI;
+      double roll_deg = fastmath::rollFromQuaternion(orientation) * 180.0 / M_PI;
+      double pitch_deg = fastmath::pitchFromQuaternion(orientation) * 180.0 / M_PI;
+      double yaw_rad = std::atan2(
+          2.0 * (orientation.w() * orientation.z() + orientation.x() * orientation.y()),
+          1.0 - 2.0 * (orientation.y() * orientation.y() + orientation.z() * orientation.z()));
+      double yaw_deg = yaw_rad * 180.0 / M_PI;
 
       if (yaw_deg < 0) yaw_deg += 360.0;
 
@@ -324,7 +327,8 @@ static void mspUpdateGPControl()
     // Calculate craft-to-target vector in world frame
     Eigen::Vector3d craftToTarget = gp_path_segment.start - aircraft_state.getPosition();
     // Transform to body frame
-    Eigen::Vector3d target_local = aircraft_state.getOrientation().inverse() * craftToTarget;
+    Eigen::Vector3d target_local = fastmath::rotateWorldToBody(
+        aircraft_state.getOrientation(), craftToTarget);
 
     double debug_getdtheta = evaluateGPOperator(GETDTHETA, pathProvider, aircraft_state, nullptr, 0, 0.0);
     double debug_getdphi = evaluateGPOperator(GETDPHI, pathProvider, aircraft_state, nullptr, 0, 0.0);
@@ -334,7 +338,8 @@ static void mspUpdateGPControl()
     double debug_getdhome = evaluateGPOperator(GETDHOME, pathProvider, aircraft_state, nullptr, 0, 0.0);
 
     // Calculate body-frame velocity for detailed logging
-    Eigen::Vector3d velocity_body = aircraft_state.getOrientation().inverse() * aircraft_state.getVelocity();
+    Eigen::Vector3d velocity_body = fastmath::rotateWorldToBody(
+        aircraft_state.getOrientation(), aircraft_state.getVelocity());
 
     // Get raw quaternion
     Eigen::Quaterniond q = aircraft_state.getOrientation();

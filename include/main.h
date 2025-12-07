@@ -6,6 +6,7 @@
 #include "MSP.h"
 #include "state.h"
 #include "flash_logger.h"
+#include <GP/autoc/gp_types.h>
 
 // Forward declarations
 struct AircraftState;
@@ -61,6 +62,6 @@ void blueToothSetEnabled(bool enabled);
 // GP rabbit path following functions
 void convertMSPStateToAircraftState(AircraftState& aircraftState);
 int getRabbitPathIndex(unsigned long elapsed_msec);
-int convertRollToMSPChannel(double gp_command);
-int convertPitchToMSPChannel(double gp_command);
-int convertThrottleToMSPChannel(double gp_command);
+int convertRollToMSPChannel(gp_scalar gp_command);
+int convertPitchToMSPChannel(gp_scalar gp_command);
+int convertThrottleToMSPChannel(gp_scalar gp_command);

@@ -21,41 +21,43 @@ public:
   EmbeddedLongSequentialPath() : segment_count(0) {}
   
   // Generate longSequential path (simplified version of GP pathgen)
-  void generatePath(double radius = 40.0, double height = 100.0, double base = SIM_INITIAL_ALTITUDE) {
+  void generatePath(gp_scalar radius = static_cast<gp_scalar>(40.0f),
+                    gp_scalar height = static_cast<gp_scalar>(100.0f),
+                    gp_scalar base = SIM_INITIAL_ALTITUDE) {
     segment_count = 0;
-    double totalDistance = 0.0;
+    gp_scalar totalDistance = 0.0f;
     
     // Origin point and loop parameters
-    Eigen::Vector3d origin(0, 0, base);
-    double loopRadius = 20.0;
+    gp_vec3 origin(0, 0, base);
+    gp_scalar loopRadius = static_cast<gp_scalar>(20.0f);
     
     // Left horizontal loop (counter-clockwise)
-    Eigen::Vector3d circle_center = origin + Eigen::Vector3d(0, -loopRadius, 0);
+    gp_vec3 circle_center = origin + gp_vec3(0, -loopRadius, 0);
     
-    for (double turn = 0; turn < 2 * M_PI && segment_count < MAX_EMBEDDED_PATH_SEGMENTS; turn += 0.05) {
-      Eigen::Vector3d point = circle_center + Eigen::Vector3d(-loopRadius * sin(turn), loopRadius * cos(turn), 0);
+    for (gp_scalar turn = 0; turn < static_cast<gp_scalar>(2.0 * M_PI) && segment_count < MAX_EMBEDDED_PATH_SEGMENTS; turn += static_cast<gp_scalar>(0.05f)) {
+      gp_vec3 point = circle_center + gp_vec3(-loopRadius * sin(turn), loopRadius * cos(turn), 0);
       
       if (segment_count > 0) {
-        double distance = (point - segments[segment_count-1].start).norm();
+        gp_scalar distance = (point - segments[segment_count-1].start).norm();
         totalDistance += distance;
       }
       
-      segments[segment_count] = Path(point, Eigen::Vector3d(1, 0, 0), totalDistance, 0.0, 
-                                     (totalDistance / SIM_RABBIT_VELOCITY) * 1000.0);
+      segments[segment_count] = Path(point, gp_vec3(1, 0, 0), totalDistance, 0.0f, 
+                                     (totalDistance / SIM_RABBIT_VELOCITY) * static_cast<gp_scalar>(1000.0f));
       segment_count++;
     }
     
     // Right horizontal loop (clockwise)
-    circle_center = origin + Eigen::Vector3d(0, loopRadius, 0);
+    circle_center = origin + gp_vec3(0, loopRadius, 0);
     
-    for (double turn = 0; turn < 2 * M_PI && segment_count < MAX_EMBEDDED_PATH_SEGMENTS; turn += 0.05) {
-      Eigen::Vector3d point = circle_center + Eigen::Vector3d(-loopRadius * sin(turn), -loopRadius * cos(turn), 0);
+    for (gp_scalar turn = 0; turn < static_cast<gp_scalar>(2.0 * M_PI) && segment_count < MAX_EMBEDDED_PATH_SEGMENTS; turn += static_cast<gp_scalar>(0.05f)) {
+      gp_vec3 point = circle_center + gp_vec3(-loopRadius * sin(turn), -loopRadius * cos(turn), 0);
       
-      double distance = (point - segments[segment_count-1].start).norm();
+      gp_scalar distance = (point - segments[segment_count-1].start).norm();
       totalDistance += distance;
       
-      segments[segment_count] = Path(point, Eigen::Vector3d(1, 0, 0), totalDistance, 0.0, 
-                                     (totalDistance / SIM_RABBIT_VELOCITY) * 1000.0);
+      segments[segment_count] = Path(point, gp_vec3(1, 0, 0), totalDistance, 0.0f, 
+                                     (totalDistance / SIM_RABBIT_VELOCITY) * static_cast<gp_scalar>(1000.0f));
       segment_count++;
     }
   }
@@ -76,8 +78,8 @@ public:
     }
   }
   
-  double getTotalPathLength() const {
-    return segment_count > 0 ? segments[segment_count - 1].distanceFromStart : 0.0;
+  gp_scalar getTotalPathLength() const {
+    return segment_count > 0 ? segments[segment_count - 1].distanceFromStart : static_cast<gp_scalar>(0.0f);
   }
 };
 

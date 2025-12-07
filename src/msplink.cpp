@@ -19,7 +19,7 @@ static AircraftState aircraft_state;
 static Path gp_path_segment; // Single GP-compatible path segment for evaluator
 
 // Path anchoring
-static Eigen::Vector3d path_origin_offset(0.0, 0.0, 0.0);
+static gp_vec3 path_origin_offset(0.0f, 0.0f, 0.0f);
 static bool path_origin_set = false;
 
 // GP Control Timing and State
@@ -40,6 +40,10 @@ static volatile bool mspSendPending = false;
 static mbed::Ticker mspSendTicker;
 static bool mspSendTickerRunning = false;
 
+static constexpr gp_scalar GP_RAD_TO_DEG = static_cast<gp_scalar>(57.2957795f);
+static constexpr gp_scalar GP_HALF_PI = static_cast<gp_scalar>(1.57079633f);
+static constexpr gp_scalar GP_INV_1000 = static_cast<gp_scalar>(0.001f);
+
 #define MSP_SEND_LOG_CAPACITY 256
 struct MspSendLogEntry
 {
@@ -56,7 +60,7 @@ static volatile uint16_t mspSendLogCount = 0;
 static volatile uint32_t lastLoggedSequenceForStats = 0;
 
 // Aircraft state tracking for position/velocity calculation
-static Eigen::Vector3d last_valid_position(0.0, 0.0, 0.0);
+static gp_vec3 last_valid_position(0.0f, 0.0f, 0.0f);
 static bool have_valid_position = false;
 static bool was_system_armed = false;
 
@@ -84,7 +88,7 @@ static void logMspSendStats();
 
 static void resetPositionHistory()
 {
-  last_valid_position = Eigen::Vector3d(0.0, 0.0, 0.0);
+  last_valid_position = gp_vec3(0.0f, 0.0f, 0.0f);
   have_valid_position = false;
 }
 
@@ -98,7 +102,7 @@ static void stopAutoc(const char *reason, bool requireServoReset)
   state.autoc_enabled = false;
   rabbit_active = false;
   path_origin_set = false;
-  path_origin_offset = Eigen::Vector3d(0.0, 0.0, 0.0);
+  path_origin_offset = gp_vec3(0.0f, 0.0f, 0.0f);
   state.autoc_countdown = 0;
   resetPositionHistory();
   analogWrite(GREEN_PIN, 255);
@@ -124,22 +128,23 @@ static void stopAutoc(const char *reason, bool requireServoReset)
   }
 }
 
-static Eigen::Vector3d neuVectorToNedMeters(const int32_t vec_cm[3])
+static gp_vec3 neuVectorToNedMeters(const int32_t vec_cm[3])
 {
-  double north = static_cast<double>(vec_cm[0]) / 100.0;
-  double east = static_cast<double>(vec_cm[1]) / 100.0;
-  double down = -static_cast<double>(vec_cm[2]) / 100.0;
-  return Eigen::Vector3d(north, east, down);
+  const gp_scalar inv100 = static_cast<gp_scalar>(0.01f);
+  gp_scalar north = static_cast<gp_scalar>(vec_cm[0]) * inv100;
+  gp_scalar east = static_cast<gp_scalar>(vec_cm[1]) * inv100;
+  gp_scalar down = -static_cast<gp_scalar>(vec_cm[2]) * inv100;
+  return gp_vec3(north, east, down);
 }
 
-static Eigen::Quaterniond neuQuaternionToNed(const float q[4])
+static gp_quat neuQuaternionToNed(const float q[4])
 {
   // INAV reports attitude as a unit quaternion in the NED earth frame (North-East-Down).
   // No additional axis swapping is required—normalize and pass it through.
-  Eigen::Quaterniond attitude(q[0], q[1], q[2], q[3]);
-  if (attitude.norm() == 0.0)
+  gp_quat attitude(q[0], q[1], q[2], q[3]);
+  if (attitude.norm() == 0.0f)
   {
-    return Eigen::Quaterniond::Identity();
+    return gp_quat::Identity();
   }
   attitude.normalize();
   return attitude;
@@ -153,9 +158,9 @@ void logGPState()
   unsigned long time_val = state.asOfMsec;
 
   // Always show velocity and position data since we now have continuous tracking
-  Eigen::Vector3d vel = aircraft_state.getVelocity();
-  Eigen::Vector3d pos = aircraft_state.getPosition();
-  double relvel = aircraft_state.getRelVel();
+  gp_vec3 vel = aircraft_state.getVelocity();
+  gp_vec3 pos = aircraft_state.getPosition();
+  gp_scalar relvel = aircraft_state.getRelVel();
 
   vel_str = String("[") + String(vel[0], 1) + "," + String(vel[1], 1) + "," + String(vel[2], 1) + "]";
   pos_str = String("[") + String(pos[0], 1) + "," + String(pos[1], 1) + "," + String(pos[2], 1) + "]";
@@ -186,53 +191,53 @@ void logGPState()
   String quat_str = "-";
   if (state.local_state_valid)
   {
-    double q0 = state.local_state.q[0];
-    double q1 = state.local_state.q[1];
-    double q2 = state.local_state.q[2];
-    double q3 = state.local_state.q[3];
+    gp_scalar q0 = state.local_state.q[0];
+    gp_scalar q1 = state.local_state.q[1];
+    gp_scalar q2 = state.local_state.q[2];
+    gp_scalar q3 = state.local_state.q[3];
 
-    double q1q1 = q1 * q1;
-    double q2q2 = q2 * q2;
-    double q3q3 = q3 * q3;
-    double q0q1 = q0 * q1;
-    double q0q2 = q0 * q2;
-    double q0q3 = q0 * q3;
-    double q1q2 = q1 * q2;
-    double q1q3 = q1 * q3;
-    double q2q3 = q2 * q3;
+    gp_scalar q1q1 = q1 * q1;
+    gp_scalar q2q2 = q2 * q2;
+    gp_scalar q3q3 = q3 * q3;
+    gp_scalar q0q1 = q0 * q1;
+    gp_scalar q0q2 = q0 * q2;
+    gp_scalar q0q3 = q0 * q3;
+    gp_scalar q1q2 = q1 * q2;
+    gp_scalar q1q3 = q1 * q3;
+    gp_scalar q2q3 = q2 * q3;
 
-    double rMat[3][3];
-    rMat[0][0] = 1.0 - 2.0 * q2q2 - 2.0 * q3q3;
-    rMat[0][1] = 2.0 * (q1q2 - q0q3);
-    rMat[0][2] = 2.0 * (q1q3 + q0q2);
-    rMat[1][0] = 2.0 * (q1q2 + q0q3);
-    rMat[1][1] = 1.0 - 2.0 * q1q1 - 2.0 * q3q3;
-    rMat[1][2] = 2.0 * (q2q3 - q0q1);
-    rMat[2][0] = 2.0 * (q1q3 - q0q2);
-    rMat[2][1] = 2.0 * (q2q3 + q0q1);
-    rMat[2][2] = 1.0 - 2.0 * q1q1 - 2.0 * q2q2;
+    gp_scalar rMat[3][3];
+    rMat[0][0] = static_cast<gp_scalar>(1.0f) - 2.0f * q2q2 - 2.0f * q3q3;
+    rMat[0][1] = 2.0f * (q1q2 - q0q3);
+    rMat[0][2] = 2.0f * (q1q3 + q0q2);
+    rMat[1][0] = 2.0f * (q1q2 + q0q3);
+    rMat[1][1] = static_cast<gp_scalar>(1.0f) - 2.0f * q1q1 - 2.0f * q3q3;
+    rMat[1][2] = 2.0f * (q2q3 - q0q1);
+    rMat[2][0] = 2.0f * (q1q3 - q0q2);
+    rMat[2][1] = 2.0f * (q2q3 + q0q1);
+    rMat[2][2] = static_cast<gp_scalar>(1.0f) - 2.0f * q1q1 - 2.0f * q2q2;
 
-    double roll_deg = atan2(rMat[2][1], rMat[2][2]) * 180.0 / M_PI;
-    double pitch_deg = (0.5 * M_PI - acos(-rMat[2][0])) * 180.0 / M_PI;
-    double yaw_deg = -atan2(rMat[1][0], rMat[0][0]) * 180.0 / M_PI;
+    gp_scalar roll_deg = atan2f(rMat[2][1], rMat[2][2]) * GP_RAD_TO_DEG;
+    gp_scalar pitch_deg = (GP_HALF_PI - acosf(-rMat[2][0])) * GP_RAD_TO_DEG;
+    gp_scalar yaw_deg = -atan2f(rMat[1][0], rMat[0][0]) * GP_RAD_TO_DEG;
 
-    if (yaw_deg < 0) yaw_deg += 360.0;
+    if (yaw_deg < 0) yaw_deg += 360.0f;
 
     att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
     quat_str = String("[") + String(q0, 3) + "," + String(q1, 3) + "," + String(q2, 3) + "," + String(q3, 3) + "]";
   }
   else
   {
-    Eigen::Quaterniond orientation = aircraft_state.getOrientation();
-    if (orientation.norm() > 0.0)
+    gp_quat orientation = aircraft_state.getOrientation();
+    if (orientation.norm() > 0.0f)
     {
       orientation.normalize();
-      Eigen::Vector3d euler = orientation.toRotationMatrix().eulerAngles(2, 1, 0); // yaw, pitch, roll
-      double yaw_deg = euler[0] * 180.0 / M_PI;
-      double pitch_deg = euler[1] * 180.0 / M_PI;
-      double roll_deg = euler[2] * 180.0 / M_PI;
+      Eigen::Matrix<gp_scalar,3,1> euler = orientation.toRotationMatrix().eulerAngles(2, 1, 0); // yaw, pitch, roll
+      gp_scalar yaw_deg = euler[0] * GP_RAD_TO_DEG;
+      gp_scalar pitch_deg = euler[1] * GP_RAD_TO_DEG;
+      gp_scalar roll_deg = euler[2] * GP_RAD_TO_DEG;
 
-      if (yaw_deg < 0) yaw_deg += 360.0;
+      if (yaw_deg < 0) yaw_deg += 360.0f;
 
       att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
       quat_str = String("[") + String(orientation.w(), 3) + "," + String(orientation.x(), 3) + ","
@@ -266,11 +271,11 @@ static void mspUpdateGPControl()
       unsigned long test_run_duration = millis() - rabbit_start_time;
       if (isFailsafe)
       {
-        logPrint(INFO, "GP Control: INAV failsafe activated (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+        logPrint(INFO, "GP Control: INAV failsafe activated (%.1fs) - disabling autoc", test_run_duration * GP_INV_1000);
       }
       else
       {
-        logPrint(INFO, "GP Control: Aircraft disarmed (%.1fs) - disabling autoc", test_run_duration / 1000.0);
+        logPrint(INFO, "GP Control: Aircraft disarmed (%.1fs) - disabling autoc", test_run_duration * GP_INV_1000);
       }
       stopAutoc(isFailsafe ? "failsafe" : "disarmed", true);
       return;
@@ -290,7 +295,7 @@ static void mspUpdateGPControl()
   // Check termination conditions
   if (elapsed_msec > GP_MAX_SINGLE_RUN_MSEC)
   {
-    logPrint(INFO, "GP Control: Test run timeout (%.1fs) - stopping rabbit", elapsed_msec / 1000.0);
+    logPrint(INFO, "GP Control: Test run timeout (%.1fs) - stopping rabbit", elapsed_msec * GP_INV_1000);
     stopAutoc("timeout", true);
     return;
   }
@@ -301,7 +306,7 @@ static void mspUpdateGPControl()
   // End of path check
   if (current_path_index >= (int)flight_path.size() - 1)
   {
-    logPrint(INFO, "GP Control: End of path reached (%.1fs) - stopping rabbit", elapsed_msec / 1000.0);
+    logPrint(INFO, "GP Control: End of path reached (%.1fs) - stopping rabbit", elapsed_msec * GP_INV_1000);
     stopAutoc("path complete", true);
     return;
   }
@@ -319,25 +324,25 @@ static void mspUpdateGPControl()
     uint32_t eval_start_us = micros();
     
     // DEBUG: Manual GETDTHETA and GETDPHI evaluation with coordinate details
-    double debug_distance = (gp_path_segment.start - aircraft_state.getPosition()).norm();
+    gp_scalar debug_distance = (gp_path_segment.start - aircraft_state.getPosition()).norm();
 
     // Calculate craft-to-target vector in world frame
-    Eigen::Vector3d craftToTarget = gp_path_segment.start - aircraft_state.getPosition();
+    gp_vec3 craftToTarget = gp_path_segment.start - aircraft_state.getPosition();
     // Transform to body frame
-    Eigen::Vector3d target_local = aircraft_state.getOrientation().inverse() * craftToTarget;
+    gp_vec3 target_local = aircraft_state.getOrientation().inverse() * craftToTarget;
 
-    double debug_getdtheta = evaluateGPOperator(GETDTHETA, pathProvider, aircraft_state, nullptr, 0, 0.0);
-    double debug_getdphi = evaluateGPOperator(GETDPHI, pathProvider, aircraft_state, nullptr, 0, 0.0);
-    double debug_getalpha = evaluateGPOperator(GETALPHA, pathProvider, aircraft_state, nullptr, 0, 0.0);
-    double debug_getdtarget = evaluateGPOperator(GETDTARGET, pathProvider, aircraft_state, nullptr, 0, 0.0);
-    double debug_getbeta = evaluateGPOperator(GETBETA, pathProvider, aircraft_state, nullptr, 0, 0.0);
-    double debug_getdhome = evaluateGPOperator(GETDHOME, pathProvider, aircraft_state, nullptr, 0, 0.0);
+    gp_scalar debug_getdtheta = evaluateGPOperator(GETDTHETA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
+    gp_scalar debug_getdphi = evaluateGPOperator(GETDPHI, pathProvider, aircraft_state, nullptr, 0, 0.0f);
+    gp_scalar debug_getalpha = evaluateGPOperator(GETALPHA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
+    gp_scalar debug_getdtarget = evaluateGPOperator(GETDTARGET, pathProvider, aircraft_state, nullptr, 0, 0.0f);
+    gp_scalar debug_getbeta = evaluateGPOperator(GETBETA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
+    gp_scalar debug_getdhome = evaluateGPOperator(GETDHOME, pathProvider, aircraft_state, nullptr, 0, 0.0f);
 
     // Calculate body-frame velocity for detailed logging
-    Eigen::Vector3d velocity_body = aircraft_state.getOrientation().inverse() * aircraft_state.getVelocity();
+    gp_vec3 velocity_body = aircraft_state.getOrientation().inverse() * aircraft_state.getVelocity();
 
     // Get raw quaternion
-    Eigen::Quaterniond q = aircraft_state.getOrientation();
+    gp_quat q = aircraft_state.getOrientation();
 
     logPrint(INFO, "DEBUG GP: world_vec=[%.1f,%.1f,%.1f] body_vec=[%.1f,%.1f,%.1f] theta=%.3f phi=%.3f alpha=%.3f dtarget=%.3f",
              craftToTarget.x(), craftToTarget.y(), craftToTarget.z(),
@@ -348,10 +353,10 @@ static void mspUpdateGPControl()
     logPrint(INFO, "GP SENSORS: quat=[%.4f,%.4f,%.4f,%.4f] vbody=[%.2f,%.2f,%.2f] alpha=%.2f beta=%.2f dtheta=%.2f dphi=%.2f dhome=%.2f",
              q.w(), q.x(), q.y(), q.z(),
              velocity_body.x(), velocity_body.y(), velocity_body.z(),
-             debug_getalpha * 180.0 / M_PI,      // Convert radians to degrees
-             debug_getbeta * 180.0 / M_PI,
-             debug_getdtheta * 180.0 / M_PI,
-             debug_getdphi * 180.0 / M_PI,
+             debug_getalpha * GP_RAD_TO_DEG,      // Convert radians to degrees
+             debug_getbeta * GP_RAD_TO_DEG,
+             debug_getdtheta * GP_RAD_TO_DEG,
+             debug_getdphi * GP_RAD_TO_DEG,
              debug_getdhome);
 
     // DEBUG: Check if path is advancing and distance increasing
@@ -359,7 +364,7 @@ static void mspUpdateGPControl()
              current_path_index, elapsed_msec, gp_path_segment.start.y(),
              aircraft_state.getPosition().y(), debug_distance);
     
-    generatedGPProgram(pathProvider, aircraft_state, 0.0);
+    generatedGPProgram(pathProvider, aircraft_state, 0.0f);
 
     // Convert GP-controlled aircraft commands to MSP RC values and cache them
     int roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
@@ -496,7 +501,7 @@ void mspUpdateState()
       path_origin_offset = neuVectorToNedMeters(state.local_state.pos);
       path_origin_set = true;
 
-      path_generator.generatePath(40.0, 100.0, 0.0);
+      path_generator.generatePath(40.0f, 100.0f, 0.0f);
       path_generator.copyToVector(flight_path);
       if (path_origin_set)
       {
@@ -529,7 +534,7 @@ void mspUpdateState()
     if (rabbit_active)
     {
       unsigned long test_run_duration = millis() - rabbit_start_time;
-      logPrint(INFO, "GP Control: Switch disabled (%.1fs) - stopping test run", test_run_duration / 1000.0);
+      logPrint(INFO, "GP Control: Switch disabled (%.1fs) - stopping test run", test_run_duration * GP_INV_1000);
     }
     if (!isArmed)
     {
@@ -771,20 +776,20 @@ static void logMspSendStats()
     return;
   }
 
-  double intervalSumMs = 0.0;
-  double intervalMinMs = 1e9;
-  double intervalMaxMs = 0.0;
+  gp_scalar intervalSumMs = 0.0f;
+  gp_scalar intervalMinMs = 1e9f;
+  gp_scalar intervalMaxMs = 0.0f;
   uint32_t intervalCount = 0;
   uint32_t lateIntervals = 0;
   const uint32_t desiredIntervalUs = MSP_SEND_INTERVAL_MSEC * 1000UL;
   const uint32_t lateThresholdUs = desiredIntervalUs + 20000UL; // allow 20ms slack (70ms total)
 
-  double latencyStartSumMs = 0.0;
-  double latencyEndSumMs = 0.0;
-  double latencyStartMinMs = 1e9;
-  double latencyStartMaxMs = 0.0;
-  double latencyEndMinMs = 1e9;
-  double latencyEndMaxMs = 0.0;
+  gp_scalar latencyStartSumMs = 0.0f;
+  gp_scalar latencyEndSumMs = 0.0f;
+  gp_scalar latencyStartMinMs = 1e9f;
+  gp_scalar latencyStartMaxMs = 0.0f;
+  gp_scalar latencyEndMinMs = 1e9f;
+  gp_scalar latencyEndMaxMs = 0.0f;
   uint32_t latencySamples = 0;
 
   uint32_t prevSend = 0;
@@ -797,7 +802,7 @@ static void logMspSendStats()
     if (i > 0)
     {
       uint32_t delta = entry.sendTimeUs - prevSend;
-      double deltaMs = delta / 1000.0;
+      gp_scalar deltaMs = static_cast<gp_scalar>(delta) * GP_INV_1000;
       intervalSumMs += deltaMs;
       intervalMinMs = std::min(intervalMinMs, deltaMs);
       intervalMaxMs = std::max(intervalMaxMs, deltaMs);
@@ -811,8 +816,8 @@ static void logMspSendStats()
 
     if (entry.sequenceChanged && entry.evalStartUs != 0 && entry.evalEndUs != 0)
     {
-      double startLatencyMs = (entry.sendTimeUs - entry.evalStartUs) / 1000.0;
-      double endLatencyMs = (entry.sendTimeUs - entry.evalEndUs) / 1000.0;
+      gp_scalar startLatencyMs = static_cast<gp_scalar>(entry.sendTimeUs - entry.evalStartUs) * GP_INV_1000;
+      gp_scalar endLatencyMs = static_cast<gp_scalar>(entry.sendTimeUs - entry.evalEndUs) * GP_INV_1000;
       latencyStartSumMs += startLatencyMs;
       latencyEndSumMs += endLatencyMs;
       latencyStartMinMs = std::min(latencyStartMinMs, startLatencyMs);
@@ -823,10 +828,10 @@ static void logMspSendStats()
     }
   }
 
-  double intervalAvgMs = intervalCount ? intervalSumMs / intervalCount : 0.0;
+  gp_scalar intervalAvgMs = intervalCount ? intervalSumMs / intervalCount : 0.0f;
   if (intervalCount == 0)
   {
-    intervalMinMs = 0.0;
+    intervalMinMs = 0.0f;
   }
 
   logPrint(INFO,
@@ -840,8 +845,8 @@ static void logMspSendStats()
 
   if (latencySamples > 0)
   {
-    double latencyStartAvgMs = latencyStartSumMs / latencySamples;
-    double latencyEndAvgMs = latencyEndSumMs / latencySamples;
+    gp_scalar latencyStartAvgMs = latencyStartSumMs / latencySamples;
+    gp_scalar latencyEndAvgMs = latencyEndSumMs / latencySamples;
     logPrint(INFO,
              "MSP latency: samples=%u start(ms) min=%.1f avg=%.1f max=%.1f end(ms) min=%.1f avg=%.1f max=%.1f",
              latencySamples,
@@ -871,9 +876,9 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     }
   }
 
-  Eigen::Vector3d position = have_valid_position ? last_valid_position : Eigen::Vector3d(0.0, 0.0, 0.0);
-  Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
-  Eigen::Quaterniond orientation = aircraftState.getOrientation();
+  gp_vec3 position = have_valid_position ? last_valid_position : gp_vec3(0.0f, 0.0f, 0.0f);
+  gp_vec3 velocity = gp_vec3::Zero();
+  gp_quat orientation = aircraftState.getOrientation();
 
   if (state.local_state_valid)
   {
@@ -886,7 +891,7 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
   }
   // If no new quaternion data, retain previous orientation from aircraft state
 
-  double speed_magnitude = velocity.norm();
+  gp_scalar speed_magnitude = velocity.norm();
 
   aircraftState.setPosition(position);
   aircraftState.setOrientation(orientation);
@@ -916,25 +921,25 @@ int getRabbitPathIndex(unsigned long elapsed_msec)
 }
 
 // MSP channel conversion functions with correct polarity
-int convertRollToMSPChannel(double gp_command)
+int convertRollToMSPChannel(gp_scalar gp_command)
 {
   // Roll: GP +1.0 = roll right = MSP 2000 (DIRECT mapping)
-  double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
-  return (int)(1500.0 + clamped * 500.0);
+  gp_scalar clamped = CLAMP_DEF(gp_command, -1.0f, 1.0f);
+  return (int)(1500.0f + clamped * 500.0f);
 }
 
-int convertPitchToMSPChannel(double gp_command)
+int convertPitchToMSPChannel(gp_scalar gp_command)
 {
   // Pitch: GP +1.0 = pitch up = MSP 1000 (INVERTED mapping to match CRRCSim)
-  double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
-  return (int)(1500.0 - clamped * 500.0);
+  gp_scalar clamped = CLAMP_DEF(gp_command, -1.0f, 1.0f);
+  return (int)(1500.0f - clamped * 500.0f);
 }
 
-int convertThrottleToMSPChannel(double gp_command)
+int convertThrottleToMSPChannel(gp_scalar gp_command)
 {
   // Throttle: GP +1.0 = full throttle = MSP 2000 (DIRECT mapping)
-  double clamped = CLAMP_DEF(gp_command, -1.0, 1.0);
-  return (int)(1500.0 + clamped * 500.0);
+  gp_scalar clamped = CLAMP_DEF(gp_command, -1.0f, 1.0f);
+  return (int)(1500.0f + clamped * 500.0f);
 }
 static void startMspSendTicker()
 {

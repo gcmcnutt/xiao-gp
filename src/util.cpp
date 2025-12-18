@@ -83,9 +83,9 @@ void logPrint(LogLevel level, const char* format, ...) {
   // Write to flash logger and get monotonic message ID
   uint32_t messageId = flashLoggerWrite(flashBuffer);
 
-  // Output to Serial with matching prefix
-  char idPrefix[20];
-  snprintf(idPrefix, sizeof(idPrefix), "#%08lu ", (unsigned long)messageId);
+  // Output to Serial with a shorter id prefix (6 digits, no '#')
+  char idPrefix[12];
+  snprintf(idPrefix, sizeof(idPrefix), "%06lu ", (unsigned long)(messageId % 1000000UL));
   Serial.print(idPrefix);
   Serial.println(flashBuffer);
 

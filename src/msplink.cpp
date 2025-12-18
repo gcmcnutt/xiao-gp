@@ -18,9 +18,9 @@ static std::vector<Path> flight_path;
 static AircraftState aircraft_state;
 static Path gp_path_segment; // Single GP-compatible path segment for evaluator
 
-// Path anchoring
-static gp_vec3 path_origin_offset(0.0f, 0.0f, 0.0f);
-static bool path_origin_set = false;
+// Test origin anchoring (captured at autoc enable; aircraft_state is expressed relative to this origin)
+static gp_vec3 test_origin_offset(0.0f, 0.0f, 0.0f);
+static bool test_origin_set = false;
 
 // GP Control Timing and State
 static unsigned long rabbit_start_time = 0;
@@ -101,8 +101,8 @@ static void stopAutoc(const char *reason, bool requireServoReset)
 
   state.autoc_enabled = false;
   rabbit_active = false;
-  path_origin_set = false;
-  path_origin_offset = gp_vec3(0.0f, 0.0f, 0.0f);
+  test_origin_set = false;
+  test_origin_offset = gp_vec3(0.0f, 0.0f, 0.0f);
   state.autoc_countdown = 0;
   resetPositionHistory();
   analogWrite(GREEN_PIN, 255);
@@ -148,113 +148,6 @@ static gp_quat neuQuaternionToNed(const float q[4])
   }
   attitude.normalize();
   return attitude;
-}
-
-// Unified GP State logging function
-void logGPState()
-{
-  // Get position/velocity data if available
-  String pos_str = "-", vel_str = "-", relvel_str = "-";
-  unsigned long time_val = state.asOfMsec;
-
-  // Always show velocity and position data since we now have continuous tracking
-  gp_vec3 vel = aircraft_state.getVelocity();
-  gp_vec3 pos = aircraft_state.getPosition();
-  gp_scalar relvel = aircraft_state.getRelVel();
-
-  vel_str = String("[") + String(vel[0], 1) + "," + String(vel[1], 1) + "," + String(vel[2], 1) + "]";
-  pos_str = String("[") + String(pos[0], 1) + "," + String(pos[1], 1) + "," + String(pos[2], 1) + "]";
-  relvel_str = String(relvel, 1);
-
-  // Time data only available when test is active
-  if (!flight_path.empty())
-  {
-    if (rabbit_active)
-    {
-      if (state.asOfMsec >= rabbit_start_time)
-      {
-        time_val = state.asOfMsec - rabbit_start_time; // Relative time during test
-      }
-      else
-      {
-        time_val = 0;
-      }
-    }
-    else
-    {
-      time_val = 0; // Test not active
-    }
-  }
-  
-  // Get attitude data if available using INAV's quaternion convention (matches Configurator)
-  String att_str = "-";
-  String quat_str = "-";
-  if (state.local_state_valid)
-  {
-    gp_scalar q0 = state.local_state.q[0];
-    gp_scalar q1 = state.local_state.q[1];
-    gp_scalar q2 = state.local_state.q[2];
-    gp_scalar q3 = state.local_state.q[3];
-
-    gp_scalar q1q1 = q1 * q1;
-    gp_scalar q2q2 = q2 * q2;
-    gp_scalar q3q3 = q3 * q3;
-    gp_scalar q0q1 = q0 * q1;
-    gp_scalar q0q2 = q0 * q2;
-    gp_scalar q0q3 = q0 * q3;
-    gp_scalar q1q2 = q1 * q2;
-    gp_scalar q1q3 = q1 * q3;
-    gp_scalar q2q3 = q2 * q3;
-
-    gp_scalar rMat[3][3];
-    rMat[0][0] = static_cast<gp_scalar>(1.0f) - 2.0f * q2q2 - 2.0f * q3q3;
-    rMat[0][1] = 2.0f * (q1q2 - q0q3);
-    rMat[0][2] = 2.0f * (q1q3 + q0q2);
-    rMat[1][0] = 2.0f * (q1q2 + q0q3);
-    rMat[1][1] = static_cast<gp_scalar>(1.0f) - 2.0f * q1q1 - 2.0f * q3q3;
-    rMat[1][2] = 2.0f * (q2q3 - q0q1);
-    rMat[2][0] = 2.0f * (q1q3 - q0q2);
-    rMat[2][1] = 2.0f * (q2q3 + q0q1);
-    rMat[2][2] = static_cast<gp_scalar>(1.0f) - 2.0f * q1q1 - 2.0f * q2q2;
-
-    gp_scalar roll_deg = atan2f(rMat[2][1], rMat[2][2]) * GP_RAD_TO_DEG;
-    gp_scalar pitch_deg = (GP_HALF_PI - acosf(-rMat[2][0])) * GP_RAD_TO_DEG;
-    gp_scalar yaw_deg = -atan2f(rMat[1][0], rMat[0][0]) * GP_RAD_TO_DEG;
-
-    if (yaw_deg < 0) yaw_deg += 360.0f;
-
-    att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
-    quat_str = String("[") + String(q0, 3) + "," + String(q1, 3) + "," + String(q2, 3) + "," + String(q3, 3) + "]";
-  }
-  else
-  {
-    gp_quat orientation = aircraft_state.getOrientation();
-    if (orientation.norm() > 0.0f)
-    {
-      orientation.normalize();
-      Eigen::Matrix<gp_scalar,3,1> euler = orientation.toRotationMatrix().eulerAngles(2, 1, 0); // yaw, pitch, roll
-      gp_scalar yaw_deg = euler[0] * GP_RAD_TO_DEG;
-      gp_scalar pitch_deg = euler[1] * GP_RAD_TO_DEG;
-      gp_scalar roll_deg = euler[2] * GP_RAD_TO_DEG;
-
-      if (yaw_deg < 0) yaw_deg += 360.0f;
-
-      att_str = String("[") + String(roll_deg, 1) + "," + String(pitch_deg, 1) + "," + String(yaw_deg, 1) + "]";
-      quat_str = String("[") + String(orientation.w(), 3) + "," + String(orientation.x(), 3) + ","
-                 + String(orientation.y(), 3) + "," + String(orientation.z(), 3) + "]";
-    }
-  }
-  
-  // Get state flags
-  bool armed = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_ARM);
-  bool failsafe = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_FAILSAFE);
-
-  bool hasServoActivation = state.rc_valid && state.rc.channelValue[MSP_ARM_CHANNEL] > MSP_ARMED_THRESHOLD;
-
-  logPrint(INFO, "GP State: pos=%s vel=%s att=%s quat=%s relvel=%s armed=%s fs=%s servo=%s autoc=%s rabbit=%s",
-           pos_str.c_str(), vel_str.c_str(), att_str.c_str(), quat_str.c_str(), relvel_str.c_str(),
-           armed ? "Y" : "N", failsafe ? "Y" : "N", hasServoActivation ? "Y" : "N", state.autoc_enabled ? "Y" : "N",
-           rabbit_active ? "Y" : "N");
 }
 
 static void mspUpdateGPControl()
@@ -323,46 +216,26 @@ static void mspUpdateGPControl()
     SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
     uint32_t eval_start_us = micros();
     
-    // DEBUG: Manual GETDTHETA and GETDPHI evaluation with coordinate details
-    gp_scalar debug_distance = (gp_path_segment.start - aircraft_state.getPosition()).norm();
-
     // Calculate craft-to-target vector in world frame
     gp_vec3 craftToTarget = gp_path_segment.start - aircraft_state.getPosition();
-    // Transform to body frame
-    gp_vec3 target_local = aircraft_state.getOrientation().inverse() * craftToTarget;
-
     gp_scalar debug_getdtheta = evaluateGPOperator(GETDTHETA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
     gp_scalar debug_getdphi = evaluateGPOperator(GETDPHI, pathProvider, aircraft_state, nullptr, 0, 0.0f);
     gp_scalar debug_getalpha = evaluateGPOperator(GETALPHA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
-    gp_scalar debug_getdtarget = evaluateGPOperator(GETDTARGET, pathProvider, aircraft_state, nullptr, 0, 0.0f);
     gp_scalar debug_getbeta = evaluateGPOperator(GETBETA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
     gp_scalar debug_getdhome = evaluateGPOperator(GETDHOME, pathProvider, aircraft_state, nullptr, 0, 0.0f);
 
-    // Calculate body-frame velocity for detailed logging
-    gp_vec3 velocity_body = aircraft_state.getOrientation().inverse() * aircraft_state.getVelocity();
-
-    // Get raw quaternion
-    gp_quat q = aircraft_state.getOrientation();
-
-    logPrint(INFO, "DEBUG GP: world_vec=[%.1f,%.1f,%.1f] body_vec=[%.1f,%.1f,%.1f] theta=%.3f phi=%.3f alpha=%.3f dtarget=%.3f",
+    // GP inputs relative to rabbit
+    logPrint(INFO,
+             "GP Input: idx=%d rabbit=[%.1f,%.1f,%.1f] vec=[%.1f,%.1f,%.1f] alpha[0]=%.3f beta[0]=%.3f dtheta[0]=%.3f dphi[0]=%.3f dhome[0]=%.3f relvel=%.2f",
+             current_path_index,
+             gp_path_segment.start.x(), gp_path_segment.start.y(), gp_path_segment.start.z(),
              craftToTarget.x(), craftToTarget.y(), craftToTarget.z(),
-             target_local.x(), target_local.y(), target_local.z(),
-             debug_getdtheta, debug_getdphi, debug_getalpha, debug_getdtarget);
-
-    // NEW: Detailed GP sensor logging for frame convention verification
-    logPrint(INFO, "GP SENSORS: quat=[%.4f,%.4f,%.4f,%.4f] vbody=[%.2f,%.2f,%.2f] alpha=%.2f beta=%.2f dtheta=%.2f dphi=%.2f dhome=%.2f",
-             q.w(), q.x(), q.y(), q.z(),
-             velocity_body.x(), velocity_body.y(), velocity_body.z(),
-             debug_getalpha * GP_RAD_TO_DEG,      // Convert radians to degrees
-             debug_getbeta * GP_RAD_TO_DEG,
-             debug_getdtheta * GP_RAD_TO_DEG,
-             debug_getdphi * GP_RAD_TO_DEG,
-             debug_getdhome);
-
-    // DEBUG: Check if path is advancing and distance increasing
-    logPrint(INFO, "DEBUG RABBIT: idx=%d, elapsed=%lums, target_y=%.1f, craft_y=%.1f, dist=%.1f",
-             current_path_index, elapsed_msec, gp_path_segment.start.y(),
-             aircraft_state.getPosition().y(), debug_distance);
+             debug_getalpha,
+             debug_getbeta,
+             debug_getdtheta,
+             debug_getdphi,
+             debug_getdhome,
+             aircraft_state.getRelVel());
     
     generatedGPProgram(pathProvider, aircraft_state, 0.0f);
 
@@ -372,9 +245,7 @@ static void mspUpdateGPControl()
     int throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
     updateCachedCommands(roll_cmd, pitch_cmd, throttle_cmd, eval_start_us);
 
-    logPrint(INFO, "GP Eval: target=[%.1f,%.1f,%.1f] idx=%d setRcData=[%d,%d,%d]",
-             gp_path_segment.start[0], gp_path_segment.start[1], gp_path_segment.start[2],
-             current_path_index, roll_cmd, pitch_cmd, throttle_cmd);
+    logPrint(INFO, "GP Output: rc=[%d,%d,%d]", roll_cmd, pitch_cmd, throttle_cmd);
   }
 }
 
@@ -498,18 +369,11 @@ void mspUpdateState()
 
     if (state.local_state_valid)
     {
-      path_origin_offset = neuVectorToNedMeters(state.local_state.pos);
-      path_origin_set = true;
+      test_origin_offset = neuVectorToNedMeters(state.local_state.pos); // capture absolute INAV position at enable
+      test_origin_set = true;
 
-      path_generator.generatePath(40.0f, 100.0f, 0.0f);
+      path_generator.generatePath(40.0f, 100.0f, SIM_INITIAL_ALTITUDE);
       path_generator.copyToVector(flight_path);
-      if (path_origin_set)
-      {
-        for (auto &segment : flight_path)
-        {
-          segment.start += path_origin_offset;
-        }
-      }
 
       rabbit_start_time = millis();
       rabbit_active = true;
@@ -520,8 +384,8 @@ void mspUpdateState()
       state.autoc_enabled = true;
       servo_reset_required = false;
       analogWrite(GREEN_PIN, 0);
-      logPrint(INFO, "GP Control: Switch enabled - path origin NED=[%.2f, %.2f, %.2f] - starting flight test",
-               path_origin_offset.x(), path_origin_offset.y(), path_origin_offset.z());
+      logPrint(INFO, "GP Control: Switch enabled - test origin NED=[%.2f, %.2f, %.2f] - starting flight test",
+               test_origin_offset.x(), test_origin_offset.y(), test_origin_offset.z());
     }
     else
     {
@@ -553,11 +417,42 @@ void mspUpdateState()
   // Update aircraft state on every MSP cycle for continuous position/velocity tracking
   convertMSPStateToAircraftState(aircraft_state);
 
+  // Log raw vs GP-relative state for correlation (no inference beyond origin offset)
+  gp_vec3 pos_raw = gp_vec3::Zero();
+  gp_vec3 vel_raw = gp_vec3::Zero();
+  if (state.local_state_valid)
+  {
+    pos_raw = neuVectorToNedMeters(state.local_state.pos);
+    vel_raw = neuVectorToNedMeters(state.local_state.vel);
+  }
+  else if (have_valid_position)
+  {
+    pos_raw = last_valid_position;
+  }
+  gp_vec3 pos_rel = aircraft_state.getPosition();
+  gp_vec3 vel_rel = aircraft_state.getVelocity();
+  gp_quat q = aircraft_state.getOrientation();
+  if (q.norm() > 0.0f)
+  {
+    q.normalize();
+  }
+  bool armed = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_ARM);
+  bool failsafe = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_FAILSAFE);
+
+  logPrint(INFO,
+           "GP State: pos_raw=[%.2f,%.2f,%.2f] pos=[%.2f,%.2f,%.2f] vel=[%.2f,%.2f,%.2f] quat=[%.3f,%.3f,%.3f,%.3f] armed=%s fs=%s servo=%s autoc=%s rabbit=%s",
+           pos_raw.x(), pos_raw.y(), pos_raw.z(),
+           pos_rel.x(), pos_rel.y(), pos_rel.z(),
+           vel_rel.x(), vel_rel.y(), vel_rel.z(),
+           q.w(), q.x(), q.y(), q.z(),
+           armed ? "Y" : "N",
+           failsafe ? "Y" : "N",
+           hasServoActivation ? "Y" : "N",
+           state.autoc_enabled ? "Y" : "N",
+           rabbit_active ? "Y" : "N");
+
   // Update GP control and cache commands when enabled
   mspUpdateGPControl();
-
-  // Always log unified GP State with available data or "-" for missing
-  logGPState();
 }
 
 void mspSetControls()
@@ -876,24 +771,36 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     }
   }
 
-  gp_vec3 position = have_valid_position ? last_valid_position : gp_vec3(0.0f, 0.0f, 0.0f);
+  gp_vec3 position_raw = have_valid_position ? last_valid_position : gp_vec3(0.0f, 0.0f, 0.0f);
+  gp_vec3 position_rel = position_raw;
   gp_vec3 velocity = gp_vec3::Zero();
   gp_quat orientation = aircraftState.getOrientation();
 
   if (state.local_state_valid)
   {
-    position = neuVectorToNedMeters(state.local_state.pos);
+    position_raw = neuVectorToNedMeters(state.local_state.pos);
     velocity = neuVectorToNedMeters(state.local_state.vel);
     orientation = neuQuaternionToNed(state.local_state.q);
 
-    last_valid_position = position;
+    last_valid_position = position_raw;
     have_valid_position = true;
   }
+  if (test_origin_set)
+  {
+    position_rel = position_raw - test_origin_offset; // express aircraft_state in virtual-origin frame
+  }
+  else
+  {
+    position_rel = position_raw;
+  }
+
+  // Shift virtual frame so arming point maps to (0,0,SIM_INITIAL_ALTITUDE) like training
+  position_rel += gp_vec3(0.0f, 0.0f, SIM_INITIAL_ALTITUDE);
   // If no new quaternion data, retain previous orientation from aircraft state
 
   gp_scalar speed_magnitude = velocity.norm();
 
-  aircraftState.setPosition(position);
+  aircraftState.setPosition(position_rel);
   aircraftState.setOrientation(orientation);
   aircraftState.setVelocity(velocity);
   aircraftState.setRelVel(speed_magnitude);

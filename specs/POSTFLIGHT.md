@@ -43,6 +43,18 @@ When the do agree, then we are left with flight dynamics differences between sim
 - coordinate systems: inav uses NEU, xiao-gp uses NED.  See ~/GP/autoc/COORDINATE_CONVENTIONS.md for more details.
 - rc command outputs from xiao wind up as rcData[] fields in inav blackbox log. the actual servo fields rcServo[] are outputs to command servos after running through a mixer, etc.  rcData[0] should line up with roll, rcData[1] should line up with pitch, and rcData[2] should be throttle.  Will need to dig into inav to ensure the commands are turning into the conventional commands.
 
+### INAV RC columns to capture
+- `rcData[0..3]` in the blackbox CSV are roll, pitch, throttle, yaw (1000–2000 µs). `rcCommand[0..3]` are the FC’s internal commands after rates/expo. These are the columns to line up against xiao `setRcData`.
+- Servo outputs show up as `servo[0]`, `servo[1]` (per-logframe mixer output) and are useful to confirm mixer behavior but not for direct GP correlation.
+- If you need override status, `mspOverrideFlags` is the bitfield that marks MSP RC override activity; include it when extracting slices around GP Control spans.
+
+### quick decode note (flight21)
+From `~/GP/autoc`, we decoded the flight21 INAV blackbox with:
+```
+../../blackbox-tools/obj/blackbox_decode --index 0 --stdout "/mnt/c/Users/gcmcn/OneDrive/Documents/Navigation/HB1-orange-configs/flight21-blackbox_log_2025-12-16_171249.TXT" > flight21.csv
+```
+The resulting CSV was used for time correlation against the xiao flight log.
+
 ## steps
 1. Generate analytics programs to do basic parsing of the two log files.
 2. These files typically relate to more than one test inside a single flight. in INAV we should find places where MSPRCOVERRIDE are set. This is when autoc takes over.  Similar log events are seen in the ~/xiao-gp flight logs as marked by lines like 'GP Control: Switch enabled'.

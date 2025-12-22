@@ -3,7 +3,7 @@ Here we describe how to analyze the log files generated during post-flight data 
 
 ## data sources
 Two log files are generated during post-flight data collection.  They are located in directory: /mnt/c/Users/gmcnutt/OneDrive/Documents/Navigation/HB1-orange-configs/  The two files are:
-- flightXX-blackbox_log_[datetime].TXT: This file is generated from inav blackbox data using the ~/blackbox-tools code. Keep in mind the coordinate conventions for inav is NEU.  There are a few key fields to focus on: 
+- flightXX-blackbox_log_[datetime].TXT: This file is generated from inav blackbox data using the ~/blackbox-tools code. INAV uses **NED** (North-East-Down) coordinate frame with body→earth quaternions. The xiao-gp msplink.cpp applies a conjugate transformation to convert to earth→body quaternions matching the GP contract. See ~/GP/autoc/specs/COORDINATE_CONVENTIONS.md for details. There are a few key fields to focus on: 
   - 'time (us)' for correlating time to ~/xiao-gp logs, rcData[], quaternion[], navPos[], navVel[].
   - xiao logfile examples include: 
    #00000130 0056689 0057367 i GP Control: Switch enabled - path origin NED=[182.31, 11.43, -77.67] - starting flight test
@@ -40,7 +40,7 @@ When the do agree, then we are left with flight dynamics differences between sim
 
 ## connections
 - logfile correlation: use 'time (us)' field in blackbox log to correlate to 'time' field in xiao-gp log which comes from the msp get time calls in msplink.cpp
-- coordinate systems: inav uses NEU, xiao-gp uses NED.  See ~/GP/autoc/COORDINATE_CONVENTIONS.md for more details.
+- coordinate systems: **Both INAV and xiao-gp/GP use NED** (North-East-Down) coordinates. INAV sends body→earth quaternions via MSP which msplink.cpp converts to earth→body via conjugate transformation. Blackbox logs contain raw INAV body→earth quaternions. See ~/GP/autoc/specs/COORDINATE_CONVENTIONS.md for complete details.
 - rc command outputs from xiao wind up as rcData[] fields in inav blackbox log. the actual servo fields rcServo[] are outputs to command servos after running through a mixer, etc.  rcData[0] should line up with roll, rcData[1] should line up with pitch, and rcData[2] should be throttle.  Will need to dig into inav to ensure the commands are turning into the conventional commands.
 
 ### INAV RC columns to capture
@@ -55,14 +55,78 @@ From `~/GP/autoc`, we decoded the flight21 INAV blackbox with:
 ```
 The resulting CSV was used for time correlation against the xiao flight log.
 
-## steps
-1. Generate analytics programs to do basic parsing of the two log files.
-2. These files typically relate to more than one test inside a single flight. in INAV we should find places where MSPRCOVERRIDE are set. This is when autoc takes over.  Similar log events are seen in the ~/xiao-gp flight logs as marked by lines like 'GP Control: Switch enabled'.
-3. Be convinced that inav input is correctly represented as sensor input to the generated GP. Recall the flow for generating the GP is to do a training run using ~/GP/autoc with a configuration file like autoc.ini. Later this archived GP is evaluated using autoc-eval.ini.  After all looks good, this GP is translated to source code for xiao-gp in its generated directory.
-4. Once convinced of correct input, then analyze the output of the GP in flight versus the output of the GP in simulation.  Look for differences and try to understand why.
+## analysis workflow
 
-Early runs I expect both sensor and control output to be not quite right.  Sensor or control force polarity issues. Quaternion orientation incorrect. Units of measure, etc.
+### Step 1: Decode blackbox log
+Decode the INAV blackbox .TXT file to CSV using blackbox_decode:
+```bash
+cd ~/GP/autoc
+~/xiao-gp/postflight/blackbox-tools/blackbox_decode --index 0 --stdout \
+  "/mnt/c/Users/gcmcn/OneDrive/Documents/Navigation/HB1-orange-configs/flight24-blackbox_log_2025-12-21_100239.TXT" \
+  > flight24.csv
+```
 
-Also we can occasionally enhance the ~/crsim/crrcsim-0.9.13/models/hb1.xml.  The ultimate goal is a sensible 'sim to real' pipline for genreating real world flight control for models with slight variations.
+### Step 2: Create flight directory and analysis scripts
+```bash
+mkdir -p ~/xiao-gp/postflight/flight24
+cd ~/xiao-gp/postflight/flight24
+```
 
-5. We can also compare unusual controls to how the GP eval runs as seen in data.dat files from ~/GP/autoc.  This can help isolate if the issue is in the GP eval or in the sensor translation or flight dynamics.  
+Copy and adapt analysis scripts from a previous flight (e.g., flight23):
+- `analyze_flight24.py` - Main analysis script that:
+  - Parses GP Control spans from xiao log
+  - Correlates GP Output RC commands to INAV rcData
+  - Applies origin offset convention
+  - Generates per-span overlays for position/velocity/quaternion and RC
+  - Outputs timing and rcData deltas to spot latency issues
+- `control_response_flight24.py` - Control→state response plots:
+  - Sim: commands vs roll/pitch/speed from data.dat
+  - Xiao: RC commands vs roll/pitch/speed per span
+
+Update file paths in both scripts to point to:
+- BLACKBOX_CSV: `/home/gmcnutt/GP/autoc/flight24.csv`
+- XIAO_LOG: path in `/mnt/c/Users/gcmcn/OneDrive/Documents/Navigation/HB1-orange-configs/`
+- SIM_DATA: `/home/gmcnutt/GP/autoc/data.dat`
+
+### Step 3: Run analysis scripts
+```bash
+cd ~/xiao-gp/postflight/flight24
+python3 analyze_flight24.py      # Generates span{1,2,3}_overview.png
+python3 control_response_flight24.py  # Generates control_response_*.png
+```
+
+### Step 4: Review outputs
+The scripts generate:
+- **span{N}_overview.png**: Per-span plots showing:
+  - Position (N, E, D) overlaid with path target
+  - Velocity magnitude
+  - Quaternion components (qw, qx, qy, qz)
+  - RC commands (roll, pitch, throttle)
+
+- **control_response_sim.png**: Simulator control→state response
+  - Commands (roll_cmd, pitch_cmd, throttle) on left axis
+  - Resulting roll/pitch attitude and speed on right axis
+
+- **control_response_xiao_span{N}.png**: Per-span xiao control→state response
+  - RC commands (1000-2000µs) on left axis
+  - Resulting roll/pitch attitude and speed on right axis
+
+Console output shows:
+- Detected test spans with timing and sample counts
+- RC correlation statistics (lag, deltas between commanded and actual)
+- GP input parity check (recomputed vs logged sensor values)
+
+### Analysis goals
+1. **Correlation verification**: Ensure xiao debug values correlate to INAV blackbox data after all unit conversions and coordinate transformations.
+
+2. **Coordinate system validation**: Verify INAV data (NED, body→earth quaternions) is correctly transformed by xiao-gp (conjugate to earth→body) to match GP training data contract. See ~/GP/autoc/specs/COORDINATE_CONVENTIONS.md.
+
+3. **Sensor parity**: Confirm GP sensor inputs (alpha, beta, dtheta, dphi, dhome, relvel) match between logged values and recomputed values from raw state data.
+
+4. **Control response**: Compare GP output in flight vs simulation:
+   - Early flights may show sensor polarity issues, quaternion errors, unit conversion problems
+   - Later flights should show dynamics differences (unmodeled aero, wind, etc.)
+
+5. **Simulation alignment**: Compare with ~/GP/autoc/data.dat to isolate whether issues are in GP eval, sensor translation, or flight dynamics.
+
+The ultimate goal is a robust sim-to-real pipeline for generating flight control for aircraft models with variations.  

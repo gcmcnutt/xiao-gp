@@ -139,9 +139,10 @@ static gp_vec3 neuVectorToNedMeters(const int32_t vec_cm[3])
 
 static gp_quat neuQuaternionToNed(const float q[4])
 {
-  // INAV reports attitude as a unit quaternion in the NED earth frame (North-East-Down).
-  // No additional axis swapping is required—normalize and pass it through.
-  gp_quat attitude(q[0], q[1], q[2], q[3]);
+  // INAV sends body->earth quaternion (confirmed via bench testing).
+  // GP expects earth->body, so we take the conjugate.
+  // Bench tests show ALL vector components need sign flip.
+  gp_quat attitude(q[0], -q[1], -q[2], -q[3]);  // Full conjugate
   if (attitude.norm() == 0.0f)
   {
     return gp_quat::Identity();

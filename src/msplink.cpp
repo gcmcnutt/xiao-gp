@@ -1,6 +1,6 @@
 #include <main.h>
 #include <GP/autoc/aircraft_state.h>
-#include <embedded_pathgen.h>
+#include <embedded_pathgen_selector.h>
 #include <GP/autoc/gp_evaluator_embedded.h>
 #include <gp_program.h>
 #include <mbed.h>
@@ -13,7 +13,7 @@ MSP msp;
 State state;
 
 // GP Rabbit Path Following System
-static EmbeddedLongSequentialPath path_generator;
+static EmbeddedPathSelector path_generator;
 static std::vector<Path> flight_path;
 static AircraftState aircraft_state;
 static Path gp_path_segment; // Single GP-compatible path segment for evaluator
@@ -26,6 +26,7 @@ static bool test_origin_set = false;
 static unsigned long rabbit_start_time = 0;
 static volatile bool rabbit_active = false;
 static int current_path_index = 0;
+static int selected_path_index = 0;  // Path selected from RC channel (0-5)
 static bool servo_reset_required = false;
 
 // MSP Control Output Caching and scheduling
@@ -302,6 +303,18 @@ void mspUpdateState()
     stopAutoc("MSP RC failure", true);
   }
 
+  // Sample path selector channel every cycle (for pre-flight validation and GP State logging)
+  int pathSelectorRcValue = MSP_DEFAULT_CHANNEL_VALUE;
+  int pathSelectorIndex = 0;  // Default to path 0 (StraightAndLevel)
+
+  if (state.rc_valid) {
+    pathSelectorRcValue = state.rc.channelValue[MSP_PATH_SELECT_CHANNEL];
+    // Map 1000-2000 → 0-5 (6-position switch)
+    // Each position gets ~167μs range: 1000, 1200, 1400, 1600, 1800, 2000
+    int clamped = constrain(pathSelectorRcValue, 1000, 2000);
+    pathSelectorIndex = min(5, (clamped - 1000) * 6 / 1001);  // Scale to 0-5
+  }
+
   // ok, let's see what we fetched and updated.
   // first, check if we have a valid status
   bool isArmed = state.status_valid && state.status.flightModeFlags & (1 << MSP_MODE_ARM);
@@ -373,8 +386,38 @@ void mspUpdateState()
       test_origin_offset = neuVectorToNedMeters(state.local_state.pos); // capture absolute INAV position at enable
       test_origin_set = true;
 
-      path_generator.generatePath(40.0f, 100.0f, SIM_INITIAL_ALTITUDE);
+      // Use cached path selector value from cycle sampling
+      int pathIndex = pathSelectorIndex;
+      selected_path_index = pathIndex;  // Store armed path index for reference
+
+      // Get current altitude for base
+      gp_scalar base_altitude = test_origin_offset.z();
+
+      // Generate selected path with seed for reproducibility
+      const char* pathNames[] = {
+        "StraightAndLevel",
+        "SpiralClimb",
+        "HorizontalFigureEight",
+        "FortyFiveDegreeAngledLoop",
+        "HighPerchSplitS",
+        "SeededRandomB"
+      };
+
+      uint32_t generation_start_us = micros();
+      path_generator.generatePath(pathIndex, base_altitude, EMBEDDED_PATH_SEED);
+      uint32_t generation_duration_us = micros() - generation_start_us;
+
       path_generator.copyToVector(flight_path);
+
+      // Log path generation summary
+      logPrint(INFO, "Path armed: %d=%s, %d/%d segments, alt=%.2fm, seed=%u, time=%.1fms",
+               pathIndex, pathNames[pathIndex], (int)flight_path.size(), MAX_EMBEDDED_PATH_SEGMENTS,
+               base_altitude, EMBEDDED_PATH_SEED, generation_duration_us / 1000.0f);
+
+      if (path_generator.wasTruncated()) {
+        logPrint(WARNING, "*** Path was TRUNCATED at MAX_EMBEDDED_PATH_SEGMENTS=%d ***",
+                 MAX_EMBEDDED_PATH_SEGMENTS);
+      }
 
       rabbit_start_time = millis();
       rabbit_active = true;
@@ -441,7 +484,7 @@ void mspUpdateState()
   bool failsafe = state.status_valid && state.status.flightModeFlags & (1UL << MSP_MODE_FAILSAFE);
 
   logPrint(INFO,
-           "GP State: pos_raw=[%.2f,%.2f,%.2f] pos=[%.2f,%.2f,%.2f] vel=[%.2f,%.2f,%.2f] quat=[%.3f,%.3f,%.3f,%.3f] armed=%s fs=%s servo=%s autoc=%s rabbit=%s",
+           "GP State: pos_raw=[%.2f,%.2f,%.2f] pos=[%.2f,%.2f,%.2f] vel=[%.2f,%.2f,%.2f] quat=[%.3f,%.3f,%.3f,%.3f] armed=%s fs=%s servo=%s autoc=%s rabbit=%s path=%d",
            pos_raw.x(), pos_raw.y(), pos_raw.z(),
            pos_rel.x(), pos_rel.y(), pos_rel.z(),
            vel_rel.x(), vel_rel.y(), vel_rel.z(),
@@ -450,7 +493,8 @@ void mspUpdateState()
            failsafe ? "Y" : "N",
            hasServoActivation ? "Y" : "N",
            state.autoc_enabled ? "Y" : "N",
-           rabbit_active ? "Y" : "N");
+           rabbit_active ? "Y" : "N",
+           pathSelectorIndex);
 
   // Update GP control and cache commands when enabled
   mspUpdateGPControl();

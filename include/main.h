@@ -28,6 +28,7 @@ struct AircraftState;
 #define MSP_ARM_CHANNEL 8
 #define MSP_ARMED_THRESHOLD 1600
 #define MSP_ARM_CYCLE_COUNT 2
+#define MSP_PATH_SELECT_CHANNEL 9  // INAV RC channel 10 → MSP array index 9 (6-position switch: 1000-2000 → paths 0-5)
 
 // MSP flight mode flags
 #define MSP_MODE_MSPRCOVERRIDE 30

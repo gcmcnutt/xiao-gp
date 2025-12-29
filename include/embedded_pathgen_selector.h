@@ -231,17 +231,16 @@ private:
 public:
   EmbeddedPathSelector() : segment_count(0), was_truncated(false) {}
 
-  // Generate selected path at specified Z origin
-  // For xiao-gp: Call with base=0.0 (craft at virtual origin 0,0,0)
-  // For desktop: Call with base=SIM_INITIAL_ALTITUDE (e.g., -25m in NED)
+  // Generate selected path at canonical origin (0,0,0)
+  // Paths generate in canonical coordinate frame; craft at virtual (0,0,0) when armed
   // WARNING: If path exceeds MAX_EMBEDDED_PATH_SEGMENTS, it will be truncated
-  void generatePath(int pathIndex, gp_scalar base = SIM_INITIAL_ALTITUDE, unsigned int seed = EMBEDDED_PATH_SEED) {
+  void generatePath(int pathIndex, gp_scalar base = 0.0f, unsigned int seed = EMBEDDED_PATH_SEED) {
     segment_count = 0;
     was_truncated = false;
     gp_scalar totalDistance = static_cast<gp_scalar>(0.0f);
 
     AeroStandardPathType pathType = static_cast<AeroStandardPathType>(pathIndex % static_cast<int>(AERO_END_MARKER));
-    gp_vec3 entryPoint(static_cast<gp_scalar>(0.0f), static_cast<gp_scalar>(0.0f), base);
+    gp_vec3 entryPoint(static_cast<gp_scalar>(0.0f), static_cast<gp_scalar>(0.0f), static_cast<gp_scalar>(0.0f));
 
     switch(pathType) {
       case StraightAndLevel: {
@@ -266,7 +265,7 @@ public:
         addStraightSegment(entryPoint, gp_vec3(static_cast<gp_scalar>(-1.0f), static_cast<gp_scalar>(0.0f), static_cast<gp_scalar>(0.0f)), static_cast<gp_scalar>(20.0f), totalDistance);
 
         gp_vec3 spiralStart = segments[segment_count-1].start;
-        gp_scalar climbAmount = static_cast<gp_scalar>(-75.0f) - spiralStart[2];
+        gp_scalar climbAmount = static_cast<gp_scalar>(-50.0f);  // Climb 50m from z=0 to z=-50
         addSpiralTurn(spiralStart, static_cast<gp_scalar>(20.0f), static_cast<gp_scalar>(540.0f * M_PI / 180.0f), true, climbAmount, totalDistance);
 
         gp_vec3 northStart = segments[segment_count-1].start;
@@ -294,7 +293,7 @@ public:
         const gp_scalar cos45 = std::sqrt(static_cast<gp_scalar>(2.0f)) / static_cast<gp_scalar>(2.0f);
         const gp_scalar sin45 = cos45;
         gp_scalar loopRadius = static_cast<gp_scalar>(15.0f);
-        gp_scalar centerAlt = base - loopRadius * cos45;
+        gp_scalar centerAlt = -loopRadius * cos45;  // Canonical origin at z=0
         gp_scalar yOffset = loopRadius * sin45;
 
         for (gp_scalar turn = 0; turn < static_cast<gp_scalar>(M_PI * 2.0); turn += static_cast<gp_scalar>(0.05f)) {  // 0.05 rad - baseline from horizontal 8
@@ -367,7 +366,7 @@ public:
 
         gp_vec3 controlPoints[NUM_SEGMENTS_PER_PATH];
         for (int i = 0; i < NUM_SEGMENTS_PER_PATH; ++i) {
-          controlPoints[i] = localRandomPointInCylinder(rng, static_cast<gp_scalar>(40.0f), static_cast<gp_scalar>(100.0f), base);
+          controlPoints[i] = localRandomPointInCylinder(rng, static_cast<gp_scalar>(40.0f), static_cast<gp_scalar>(100.0f), static_cast<gp_scalar>(0.0f));
         }
 
         // Generate smooth path through control points

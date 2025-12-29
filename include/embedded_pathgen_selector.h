@@ -231,7 +231,9 @@ private:
 public:
   EmbeddedPathSelector() : segment_count(0), was_truncated(false) {}
 
-  // Generate selected path
+  // Generate selected path at specified Z origin
+  // For xiao-gp: Call with base=0.0 (craft at virtual origin 0,0,0)
+  // For desktop: Call with base=SIM_INITIAL_ALTITUDE (e.g., -25m in NED)
   // WARNING: If path exceeds MAX_EMBEDDED_PATH_SEGMENTS, it will be truncated
   void generatePath(int pathIndex, gp_scalar base = SIM_INITIAL_ALTITUDE, unsigned int seed = EMBEDDED_PATH_SEED) {
     segment_count = 0;

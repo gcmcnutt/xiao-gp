@@ -390,9 +390,6 @@ void mspUpdateState()
       int pathIndex = pathSelectorIndex;
       selected_path_index = pathIndex;  // Store armed path index for reference
 
-      // Get current altitude for base
-      gp_scalar base_altitude = test_origin_offset.z();
-
       // Generate selected path with seed for reproducibility
       const char* pathNames[] = {
         "StraightAndLevel",
@@ -404,15 +401,16 @@ void mspUpdateState()
       };
 
       uint32_t generation_start_us = micros();
-      path_generator.generatePath(pathIndex, base_altitude, EMBEDDED_PATH_SEED);
+      // Generate path at canonical origin (0,0,0) - craft is already at virtual (0,0,0)
+      path_generator.generatePath(pathIndex, 0.0f, EMBEDDED_PATH_SEED);
       uint32_t generation_duration_us = micros() - generation_start_us;
 
       path_generator.copyToVector(flight_path);
 
       // Log path generation summary
-      logPrint(INFO, "Path armed: %d=%s, %d/%d segments, alt=%.2fm, seed=%u, time=%.1fms",
+      logPrint(INFO, "Path armed: %d=%s, %d/%d segments, origin=(0,0,0), seed=%u, time=%.1fms",
                pathIndex, pathNames[pathIndex], (int)flight_path.size(), MAX_EMBEDDED_PATH_SEGMENTS,
-               base_altitude, EMBEDDED_PATH_SEED, generation_duration_us / 1000.0f);
+               EMBEDDED_PATH_SEED, generation_duration_us / 1000.0f);
 
       if (path_generator.wasTruncated()) {
         logPrint(WARNING, "*** Path was TRUNCATED at MAX_EMBEDDED_PATH_SEGMENTS=%d ***",
@@ -839,8 +837,7 @@ void convertMSPStateToAircraftState(AircraftState &aircraftState)
     position_rel = position_raw;
   }
 
-  // Shift virtual frame so arming point maps to (0,0,SIM_INITIAL_ALTITUDE) like training
-  position_rel += gp_vec3(0.0f, 0.0f, SIM_INITIAL_ALTITUDE);
+  // Paths now generate at canonical (0,0,0); craft already at virtual (0,0,0) when armed
   // If no new quaternion data, retain previous orientation from aircraft state
 
   gp_scalar speed_magnitude = velocity.norm();

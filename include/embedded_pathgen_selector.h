@@ -15,6 +15,7 @@
 #define MAX_EMBEDDED_PATH_SEGMENTS 400  // Path 4 needs 357, add margin for safety
 #define EMBEDDED_PATH_SEED 67890         // Matches autoc.ini RandomPathSeedB
 #define NUM_SEGMENTS_PER_PATH 16         // For random path control points
+#define AERO_STANDARD_RANDOM_PATH_SECONDS 15  // Match trainer path duration limit
 
 // AeroStandard path types (matches pathgen.h)
 enum AeroStandardPathType {
@@ -296,7 +297,7 @@ public:
         gp_scalar centerAlt = -loopRadius * cos45;  // Canonical origin at z=0
         gp_scalar yOffset = loopRadius * sin45;
 
-        for (gp_scalar turn = 0; turn < static_cast<gp_scalar>(M_PI * 2.0); turn += static_cast<gp_scalar>(0.05f)) {  // 0.05 rad - baseline from horizontal 8
+        for (gp_scalar turn = 0; turn < static_cast<gp_scalar>(M_PI * 2.0); turn += static_cast<gp_scalar>(0.5f)) {  // 0.5 rad - coarse to match trainer
           if (segment_count >= MAX_EMBEDDED_PATH_SEGMENTS) break;
 
           gp_scalar angle = turn - static_cast<gp_scalar>(M_PI / 2.0);
@@ -371,7 +372,6 @@ public:
 
         // Generate smooth path through control points
         gp_scalar odometer = static_cast<gp_scalar>(0);
-        gp_scalar turnmeter = static_cast<gp_scalar>(0);
         gp_vec3 lastPoint;
         gp_vec3 lastDirection;
         bool first = true;
@@ -387,10 +387,15 @@ public:
               gp_vec3 newDirection = (interpolatedPoint - lastPoint).normalized();
 
               gp_scalar simTimeMsec = (odometer / SIM_RABBIT_VELOCITY) * static_cast<gp_scalar>(1000.0f);
-              segments[segment_count++] = Path(interpolatedPoint, gp_vec3::UnitX(), odometer, turnmeter, simTimeMsec);
+              segments[segment_count++] = Path(interpolatedPoint, gp_vec3::UnitX(), odometer, static_cast<gp_scalar>(0.0f), simTimeMsec);
 
               odometer += newDistance;
               lastDirection = newDirection;
+
+              // Stop at AERO_STANDARD_RANDOM_PATH_SECONDS to match trainer
+              if (simTimeMsec > AERO_STANDARD_RANDOM_PATH_SECONDS * static_cast<gp_scalar>(1000.0f)) {
+                goto exitLoop;
+              }
             } else {
               first = false;
               lastDirection = (interpolatedPoint - entryPoint).normalized();

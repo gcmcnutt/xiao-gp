@@ -426,8 +426,9 @@ void mspUpdateState()
       state.autoc_enabled = true;
       servo_reset_required = false;
       analogWrite(GREEN_PIN, 0);
-      logPrint(INFO, "GP Control: Switch enabled - test origin NED=[%.2f, %.2f, %.2f] - starting flight test",
-               test_origin_offset.x(), test_origin_offset.y(), test_origin_offset.z());
+      logPrint(INFO, "GP Control: Switch enabled - origin NED=[%.2f, %.2f, %.2f] - program=%s",
+               test_origin_offset.x(), test_origin_offset.y(), test_origin_offset.z(),
+               generatedGPProgramSource);
     }
     else
     {

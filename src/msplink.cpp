@@ -238,7 +238,10 @@ static void mspUpdateGPControl()
              debug_getdphi,
              debug_getdhome,
              aircraft_state.getRelVel());
-    
+
+    // Capture temporal history before GP evaluation (for GETDPHI_PREV, GETDTHETA_PREV, etc.)
+    aircraft_state.recordErrorHistory(debug_getdphi, debug_getdtheta, millis());
+
     generatedGPProgram(pathProvider, aircraft_state, 0.0f);
 
     // Convert GP-controlled aircraft commands to MSP RC values and cache them

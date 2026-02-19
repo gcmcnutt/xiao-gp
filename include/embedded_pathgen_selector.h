@@ -10,9 +10,9 @@
 #include <math.h>
 #include <random>  // For std::mt19937 (path 5 only)
 
-// Maximum segments based on measured density (1m straight, 0.05 rad turns):
-// Path 0: 205, Path 1: 249, Path 2: 269, Path 3: 13, Path 4: 357, Path 5: 239
-#define MAX_EMBEDDED_PATH_SEGMENTS 400  // Path 4 needs 357, add margin for safety
+// Maximum segments based on measured density (0.4m straight, 0.02 rad turns):
+// At 2.5x density vs original, Path 4 needs ~892 segments
+#define MAX_EMBEDDED_PATH_SEGMENTS 1000  // Increased for finer temporal resolution
 #define EMBEDDED_PATH_SEED 67890         // Matches autoc.ini RandomPathSeedB
 #define NUM_SEGMENTS_PER_PATH 16         // For random path control points
 #define AERO_STANDARD_RANDOM_PATH_SECONDS 15  // Match trainer path duration limit
@@ -64,7 +64,7 @@ private:
   // Helper: Add straight segment
   void addStraightSegment(const gp_vec3& start, const gp_vec3& direction,
                          gp_scalar distance, gp_scalar& totalDistance) {
-    const gp_scalar step = static_cast<gp_scalar>(1.0f);  // 1m spacing (baseline from horizontal 8 analysis)
+    const gp_scalar step = static_cast<gp_scalar>(0.4f);  // 0.4m spacing (ensures ≥20Hz at min rabbit speed 8m/s)
     gp_vec3 dir = direction.normalized();
 
     // Start from step if path is not empty to avoid duplicating last point
@@ -89,7 +89,7 @@ private:
   // Helper: Add horizontal turn
   void addHorizontalTurn(const gp_vec3& start, gp_scalar radius,
                         gp_scalar angleRadians, bool clockwise, gp_scalar& totalDistance) {
-    const gp_scalar step = static_cast<gp_scalar>(0.05f);  // 0.05 rad (~3°) spacing - baseline from horizontal 8
+    const gp_scalar step = static_cast<gp_scalar>(0.02f);  // 0.02 rad (~1°) spacing for finer temporal resolution
 
     // Determine initial heading from last two points if possible
     gp_vec3 heading(static_cast<gp_scalar>(-1.0f), static_cast<gp_scalar>(0.0f), static_cast<gp_scalar>(0.0f)); // default south
@@ -138,7 +138,7 @@ private:
   void addSpiralTurn(const gp_vec3& start, gp_scalar radius,
                     gp_scalar angleRadians, bool clockwise, gp_scalar totalClimb,
                     gp_scalar& totalDistance) {
-    const gp_scalar step = static_cast<gp_scalar>(0.05f);  // 0.05 rad (~3°) spacing - baseline from horizontal 8
+    const gp_scalar step = static_cast<gp_scalar>(0.02f);  // 0.02 rad (~1°) spacing for finer temporal resolution
 
     gp_vec3 heading(static_cast<gp_scalar>(-1.0f), static_cast<gp_scalar>(0.0f), static_cast<gp_scalar>(0.0f));
     if (segment_count >= 2) {
@@ -179,7 +179,7 @@ private:
   // Helper: Add horizontal loop
   void addHorizontalLoop(const gp_vec3& loopOrigin, gp_scalar loopRadius,
                         bool clockwise, gp_scalar& totalDistance) {
-    const gp_scalar step = static_cast<gp_scalar>(0.05f);  // 0.05 rad (~3°) spacing - baseline from horizontal 8
+    const gp_scalar step = static_cast<gp_scalar>(0.02f);  // 0.02 rad (~1°) spacing for finer temporal resolution
     gp_scalar sign = clockwise ? static_cast<gp_scalar>(-1.0f) : static_cast<gp_scalar>(1.0f);
 
     for (gp_scalar turn = 0; turn < static_cast<gp_scalar>(M_PI * 2.0); turn += step) {
@@ -203,7 +203,7 @@ private:
   // Helper: Add pitch-down loop (Split-S)
   void addPitchDownLoop(const gp_vec3& start, const gp_vec3& heading,
                        gp_scalar loopRadius, gp_scalar& totalDistance) {
-    const gp_scalar step = static_cast<gp_scalar>(0.05f);  // 0.05 rad (~3°) spacing - baseline from horizontal 8
+    const gp_scalar step = static_cast<gp_scalar>(0.02f);  // 0.02 rad (~1°) spacing for finer temporal resolution
 
     gp_vec3 headingNorm = heading.normalized();
     gp_vec3 center = start + gp_vec3(static_cast<gp_scalar>(0.0f), static_cast<gp_scalar>(0.0f), loopRadius);
@@ -377,7 +377,7 @@ public:
         bool first = true;
 
         for (int i = 1; i < NUM_SEGMENTS_PER_PATH - 3; ++i) {
-          for (gp_scalar t = 0; t <= static_cast<gp_scalar>(1.0); t += static_cast<gp_scalar>(0.05f)) {
+          for (gp_scalar t = 0; t <= static_cast<gp_scalar>(1.0); t += static_cast<gp_scalar>(0.02f)) {
             if (segment_count >= MAX_EMBEDDED_PATH_SEGMENTS) goto exitLoop;
 
             gp_vec3 interpolatedPoint = cubicInterpolate(controlPoints[i - 1], controlPoints[i],

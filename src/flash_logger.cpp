@@ -142,7 +142,7 @@ static nrfx_qspi_config_t qspiConfig = {
     .sck_delay = 0,
     .dpmen = false,
     .spi_mode = NRF_QSPI_MODE_0,
-    .sck_freq = NRF_QSPI_FREQ_32MDIV8
+    .sck_freq = NRF_QSPI_FREQ_32MDIV2  // 16 MHz (was 4 MHz) - safe for P25Q16H
   },
   .irq_priority = 6
 };
@@ -430,8 +430,7 @@ uint32_t flashLoggerGetCurrentFlightNumber() {
 }
 
 int flashLoggerGetFileCount() {
-  flashLoggerSyncBlocking(FLASH_SYNC_TIMEOUT_DEFAULT_MS);
-
+  // No sync needed - when disarmed, nothing is being written
   int count = metadata.numFlights;
   if (metadata.flightCounter > 0 &&
       (metadata.currentWriteAddr > metadata.currentFileStartAddr ||
@@ -460,8 +459,7 @@ const char* flashLoggerGetFileName(int index) {
 }
 
 uint32_t flashLoggerGetFileSize(int index) {
-  flashLoggerSyncBlocking(FLASH_SYNC_TIMEOUT_DEFAULT_MS);
-
+  // No sync needed - when disarmed, nothing is being written
   if (index < (int)metadata.numFlights) {
     return metadata.flightIndex[index].endAddr - metadata.flightIndex[index].startAddr;
   }
@@ -528,20 +526,8 @@ bool flashLoggerStartDownload(const char* filename) {
   downloadStartAddr = startAddr;
   downloadReadAddr = startAddr;
   downloadEndAddr = endAddr;
-  uint32_t rawLength = endAddr - startAddr;
-  uint32_t filteredLength = computeFilteredSize(downloadStartAddr, downloadEndAddr);
-  logPrint(INFO, "Download span: raw=%lu filtered=%lu",
-           (unsigned long)rawLength, (unsigned long)filteredLength);
-  if (filteredLength == 0) {
-    if (rawLength > 0) {
-      logPrint(WARNING, "Filtered size is zero, using raw length fallback");
-      filteredLength = rawLength;
-    } else {
-      logPrint(WARNING, "Flight #%lu has no non-zero data", (unsigned long)requestedFlight);
-      return false;
-    }
-  }
-  downloadFilteredSize = filteredLength;
+  // Use raw size directly - no pre-scan needed (walk/chew-gum: no concurrent writes when downloading)
+  downloadFilteredSize = endAddr - startAddr;
   currentState = FLASH_DOWNLOADING;
 
   logPrint(INFO, "Starting download: %s (%lu bytes) addr 0x%lx-0x%lx",

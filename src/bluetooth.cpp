@@ -21,10 +21,23 @@ BLEStringCharacteristic statusCharacteristic("F1706003-1234-5678-9ABC-DEF0123456
 static uint8_t transferBuffer[FLASH_LOGGER_CHUNK_SIZE];
 static bool transferInProgress = false;
 static bool bluetoothEnabled = true;
+static uint32_t downloadCrc = 0;
+static uint32_t downloadTotalBytes = 0;
 
 // Reboot state for non-blocking reboot after erase
 static unsigned long rebootScheduledTime = 0;
 static bool rebootScheduled = false;
+
+// CRC32 implementation (standard polynomial 0xEDB88320)
+static uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+    }
+  }
+  return crc;
+}
 
 void blueToothSetup()
 {
@@ -105,7 +118,7 @@ static void processLoggerCommand(const char* cmd) {
     char currentInfo[32];
     snprintf(currentInfo, sizeof(currentInfo), "CURRENT:%lu", (unsigned long)currentFlight);
     statusCharacteristic.writeValue(currentInfo);
-    delay(10);
+    delay(2);  // Reduced from 10ms
 
     // Send each file as separate status notification
     for (int i = 0; i < fileCount; i++) {
@@ -114,7 +127,7 @@ static void processLoggerCommand(const char* cmd) {
       char fileInfo[64];
       snprintf(fileInfo, sizeof(fileInfo), "FILE:%s:%lu", filename, (unsigned long)size);
       statusCharacteristic.writeValue(fileInfo);
-      delay(10); // Small delay between notifications
+      delay(2);  // Reduced from 10ms
     }
     statusCharacteristic.writeValue("LIST_DONE");
 
@@ -144,6 +157,8 @@ static void processLoggerCommand(const char* cmd) {
       logPrint(WARNING, "File is empty, nothing to download");
     } else if (flashLoggerStartDownload(filename)) {
       transferInProgress = true;
+      downloadCrc = 0xFFFFFFFF;  // Initialize CRC
+      downloadTotalBytes = 0;
       uint32_t filteredSize = flashLoggerGetActiveDownloadSize();
       if (filteredSize == 0) {
         filteredSize = fileSize;
@@ -185,7 +200,6 @@ static void processLoggerCommand(const char* cmd) {
 // Helper: transfer next chunk (called on demand by browser)
 static void transferNextChunk() {
   static uint32_t chunkCount = 0;
-  static uint32_t totalBytesSent = 0;
 
   if (!transferInProgress) {
     return;
@@ -196,29 +210,33 @@ static void transferNextChunk() {
   if (bytesRead < 0) {
     // Error
     logPrint(ERROR, "Flash read error during download (chunk #%lu, sent %lu bytes)",
-             (unsigned long)chunkCount, (unsigned long)totalBytesSent);
+             (unsigned long)chunkCount, (unsigned long)downloadTotalBytes);
     statusCharacteristic.writeValue("ERROR:Read failed");
     flashLoggerStopDownload();
     transferInProgress = false;
     chunkCount = 0;
-    totalBytesSent = 0;
   } else if (bytesRead == 0) {
-    // Complete
-    logPrint(INFO, "Download complete: %lu chunks, %lu total bytes",
-             (unsigned long)chunkCount, (unsigned long)totalBytesSent);
-    statusCharacteristic.writeValue("DOWNLOAD_DONE");
+    // Complete - finalize CRC and send with status
+    uint32_t finalCrc = downloadCrc ^ 0xFFFFFFFF;
+    char statusMsg[64];
+    snprintf(statusMsg, sizeof(statusMsg), "DOWNLOAD_DONE:%08lX:%lu",
+             (unsigned long)finalCrc, (unsigned long)downloadTotalBytes);
+    logPrint(INFO, "Download complete: %lu chunks, %lu bytes, CRC %08lX",
+             (unsigned long)chunkCount, (unsigned long)downloadTotalBytes, (unsigned long)finalCrc);
+    statusCharacteristic.writeValue(statusMsg);
     flashLoggerStopDownload();
     transferInProgress = false;
     chunkCount = 0;
-    totalBytesSent = 0;
   } else {
+    // Update CRC with this chunk's data
+    downloadCrc = crc32Update(downloadCrc, transferBuffer, bytesRead);
+    downloadTotalBytes += bytesRead;
     // Send chunk via notification
     dataCharacteristic.writeValue(transferBuffer, bytesRead);
     chunkCount++;
-    totalBytesSent += bytesRead;
     if (chunkCount % 20 == 0) {
       logPrint(DEBUG, "Sent %lu chunks, %lu bytes so far",
-               (unsigned long)chunkCount, (unsigned long)totalBytesSent);
+               (unsigned long)chunkCount, (unsigned long)downloadTotalBytes);
     }
   }
 }

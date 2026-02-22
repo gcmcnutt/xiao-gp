@@ -125,6 +125,25 @@
     const DATA_CHAR_UUID = 'f1706002-1234-5678-9abc-def012345678';
     const STATUS_CHAR_UUID = 'f1706003-1234-5678-9abc-def012345678';
 
+    // Cached encoder for commands
+    const textEncoder = new TextEncoder();
+
+    // Progress throttling
+    const PROGRESS_THROTTLE_MS = 100;
+    let lastProgressUpdate = 0;
+
+    // CRC32 implementation (matches firmware)
+    function crc32(data) {
+      let crc = 0xFFFFFFFF;
+      for (let i = 0; i < data.length; i++) {
+        crc ^= data[i];
+        for (let j = 0; j < 8; j++) {
+          crc = (crc >>> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+        }
+      }
+      return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
     let device;
     let loggerService;
     let controlChar;
@@ -239,8 +258,28 @@
           // Start requesting chunks
           requestNextChunk();
         }
-      } else if (value === 'DOWNLOAD_DONE') {
-        // Download complete, save file
+      } else if (value.startsWith('DOWNLOAD_DONE')) {
+        // Parse: DOWNLOAD_DONE:CRC32:SIZE
+        const parts = value.split(':');
+        if (parts.length >= 3) {
+          const expectedCrc = parseInt(parts[1], 16);
+          const expectedSize = parseInt(parts[2]);
+
+          const actualCrc = crc32(downloadBuffer.subarray(0, downloadOffset));
+
+          if (actualCrc !== expectedCrc) {
+            log(`ERROR: CRC mismatch! Expected ${expectedCrc.toString(16)}, got ${actualCrc.toString(16)}`);
+            hideProgress();
+            expectedFileSize = 0;
+            return;
+          }
+
+          if (downloadOffset !== expectedSize) {
+            log(`WARNING: Size mismatch. Expected ${expectedSize}, got ${downloadOffset}`);
+          }
+
+          log(`Download verified: CRC ${actualCrc.toString(16)} OK`);
+        }
         saveDownload();
         hideProgress();
         expectedFileSize = 0;
@@ -252,8 +291,7 @@
 
     async function requestNextChunk() {
       try {
-        const encoder = new TextEncoder();
-        await controlChar.writeValue(encoder.encode('NEXT'));
+        await controlChar.writeValue(textEncoder.encode('NEXT'));
       } catch (error) {
         console.error('Error requesting chunk:', error);
         log('Error during download: ' + error);
@@ -306,14 +344,17 @@
         downloadOffset += bytesToCopy;
       }
 
-      // Update progress
-      const kbReceived = (downloadOffset / 1024).toFixed(1);
-      const chunkSize = chunk.length;
-      let progressPercent = 0;
-      if (expectedFileSize > 0) {
-        progressPercent = Math.min(100, Math.round((downloadOffset / expectedFileSize) * 100));
+      // Throttle progress updates to reduce DOM thrashing
+      const now = Date.now();
+      if (now - lastProgressUpdate > PROGRESS_THROTTLE_MS) {
+        const kbReceived = (downloadOffset / 1024).toFixed(1);
+        let progressPercent = 0;
+        if (expectedFileSize > 0) {
+          progressPercent = Math.min(100, Math.round((downloadOffset / expectedFileSize) * 100));
+        }
+        updateProgress(progressPercent, `Received ${kbReceived} KB (${progressPercent}%)`);
+        lastProgressUpdate = now;
       }
-      updateProgress(progressPercent, `Received ${kbReceived} KB (${progressPercent}%)`);
 
       // Request next chunk (flow control - browser pulls data)
       // Continue requesting until we get DOWNLOAD_DONE status (device returns 0 bytes)
@@ -326,8 +367,7 @@
         currentFlightNumber = 0;
         log('Requesting file list...');
 
-        const encoder = new TextEncoder();
-        await controlChar.writeValue(encoder.encode('LIST'));
+        await controlChar.writeValue(textEncoder.encode('LIST'));
 
         // Files will be added via FILE: and CURRENT: status notifications
 
@@ -343,8 +383,7 @@
         log('Starting download: ' + filename);
         updateProgress(0, 'Starting...');
 
-        const encoder = new TextEncoder();
-        await controlChar.writeValue(encoder.encode('DL:' + filename));
+        await controlChar.writeValue(textEncoder.encode('DL:' + filename));
 
         log('Downloading... (wait for status notification)');
 
@@ -360,17 +399,7 @@
         return;
       }
 
-      const originalLength = downloadOffset;
-
-      // Remove trailing zeros (padding) - but limit to max 512 bytes
-      let trimCount = 0;
-      while (downloadOffset > 0 &&
-             downloadBuffer[downloadOffset - 1] === 0 &&
-             trimCount < 512) {
-        downloadOffset--;
-        trimCount++;
-      }
-
+      // CRC verification handles data integrity - no need to trim
       const blob = new Blob([downloadBuffer.subarray(0, downloadOffset)], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -379,7 +408,7 @@
       a.click();
       URL.revokeObjectURL(url);
 
-      log(`Download saved: ${downloadOffset} bytes (was ${originalLength} before trimming)`);
+      log(`Download saved: ${downloadOffset} bytes`);
       downloadBuffer = null;
       downloadOffset = 0;
     }
@@ -391,8 +420,7 @@
 
       try {
         log('Erasing all logs...');
-        const encoder = new TextEncoder();
-        await controlChar.writeValue(encoder.encode('ERASE:ALL'));
+        await controlChar.writeValue(textEncoder.encode('ERASE:ALL'));
 
         document.getElementById('fileList').innerHTML = '';
         log('Erase command sent, waiting for completion...');

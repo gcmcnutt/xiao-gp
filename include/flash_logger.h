@@ -4,7 +4,7 @@
 
 // Flash logger configuration
 #define FLASH_LOGGER_BUFFER_SIZE 4096  // 4KB RAM buffer
-#define FLASH_LOGGER_CHUNK_SIZE 128    // BLE transfer chunk size (smaller for reliability)
+#define FLASH_LOGGER_CHUNK_SIZE 240    // BLE transfer chunk size (matches BLE MTU)
 #define FLASH_MAX_FILES 999            // flight_001.txt to flight_999.txt
 
 // Flash logger states

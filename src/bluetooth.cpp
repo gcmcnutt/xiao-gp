@@ -8,7 +8,7 @@ BLEByteCharacteristic switchCharacteristic("19B10001-E8F2-537E-4F6C-D104768A1214
 // Flight Logger Service
 BLEService loggerService("F1706000-1234-5678-9ABC-DEF012345678");
 
-// Control Characteristic - write commands (DL:filename, ERASE:ALL, LIST)
+// Control Characteristic - write commands (DL:filename, ERASE:ALL, LIST, NEXT)
 BLEStringCharacteristic controlCharacteristic("F1706001-1234-5678-9ABC-DEF012345678", BLEWrite, 64);
 
 // Data Characteristic - notify file chunks

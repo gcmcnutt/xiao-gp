@@ -28,6 +28,7 @@ static uint32_t downloadTotalBytes = 0;
 static unsigned long rebootScheduledTime = 0;
 static bool rebootScheduled = false;
 
+
 // CRC32 implementation (standard polynomial 0xEDB88320)
 static uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t len) {
   for (size_t i = 0; i < len; i++) {
@@ -167,18 +168,17 @@ static void processLoggerCommand(const char* cmd) {
       char statusMsg[64];
       snprintf(statusMsg, sizeof(statusMsg), "READY:%lu:%d", (unsigned long)filteredSize, FLASH_LOGGER_CHUNK_SIZE);
       statusCharacteristic.writeValue(statusMsg);
-      logPrint(INFO, "Download ready: %s (browser will request chunks)", filename);
+      logPrint(INFO, "Download ready: %s (%lu bytes)", filename, (unsigned long)filteredSize);
+      // Wait for browser to request chunks with NEXT commands
     } else {
       statusCharacteristic.writeValue("ERROR:Cannot start download");
       logPrint(ERROR, "Failed to start download");
     }
 
   } else if (strncmp(cmd, "NEXT", 4) == 0) {
-    // Browser requesting next chunk
+    // Browser requests next chunk
     if (transferInProgress) {
       transferNextChunk();
-    } else {
-      statusCharacteristic.writeValue("ERROR:No download in progress");
     }
 
   } else if (strncmp(cmd, "ERASE:ALL", 9) == 0) {
@@ -197,48 +197,39 @@ static void processLoggerCommand(const char* cmd) {
   }
 }
 
-// Helper: transfer next chunk (called on demand by browser)
+// Send one chunk per NEXT request (simple request-response, no delays)
 static void transferNextChunk() {
-  static uint32_t chunkCount = 0;
-
-  if (!transferInProgress) {
-    return;
-  }
-
   int bytesRead = flashLoggerReadChunk(transferBuffer, FLASH_LOGGER_CHUNK_SIZE);
 
   if (bytesRead < 0) {
     // Error
-    logPrint(ERROR, "Flash read error during download (chunk #%lu, sent %lu bytes)",
-             (unsigned long)chunkCount, (unsigned long)downloadTotalBytes);
+    logPrint(ERROR, "Flash read error during download (%lu bytes sent so far)",
+             (unsigned long)downloadTotalBytes);
     statusCharacteristic.writeValue("ERROR:Read failed");
     flashLoggerStopDownload();
     transferInProgress = false;
-    chunkCount = 0;
-  } else if (bytesRead == 0) {
+    return;
+  }
+
+  if (bytesRead == 0) {
     // Complete - finalize CRC and send with status
     uint32_t finalCrc = downloadCrc ^ 0xFFFFFFFF;
     char statusMsg[64];
     snprintf(statusMsg, sizeof(statusMsg), "DOWNLOAD_DONE:%08lX:%lu",
              (unsigned long)finalCrc, (unsigned long)downloadTotalBytes);
-    logPrint(INFO, "Download complete: %lu chunks, %lu bytes, CRC %08lX",
-             (unsigned long)chunkCount, (unsigned long)downloadTotalBytes, (unsigned long)finalCrc);
+    logPrint(INFO, "Download complete: %lu bytes, CRC %08lX",
+             (unsigned long)downloadTotalBytes, (unsigned long)finalCrc);
     statusCharacteristic.writeValue(statusMsg);
     flashLoggerStopDownload();
     transferInProgress = false;
-    chunkCount = 0;
-  } else {
-    // Update CRC with this chunk's data
-    downloadCrc = crc32Update(downloadCrc, transferBuffer, bytesRead);
-    downloadTotalBytes += bytesRead;
-    // Send chunk via notification
-    dataCharacteristic.writeValue(transferBuffer, bytesRead);
-    chunkCount++;
-    if (chunkCount % 20 == 0) {
-      logPrint(DEBUG, "Sent %lu chunks, %lu bytes so far",
-               (unsigned long)chunkCount, (unsigned long)downloadTotalBytes);
-    }
+    return;
   }
+
+  // Update CRC with this chunk's data
+  downloadCrc = crc32Update(downloadCrc, transferBuffer, bytesRead);
+  downloadTotalBytes += bytesRead;
+  // Send chunk via notification (no delay - pure sync request-response)
+  dataCharacteristic.writeValue(transferBuffer, bytesRead);
 }
 
 // Non-blocking polling loop for BT work

@@ -255,7 +255,7 @@
           const chunkSize = parseInt(parts[1]);
           downloadBuffer = new Uint8Array(expectedFileSize);
           downloadOffset = 0;
-          // Start requesting chunks
+          // Request first chunk
           requestNextChunk();
         }
       } else if (value.startsWith('DOWNLOAD_DONE')) {
@@ -293,7 +293,7 @@
       try {
         await controlChar.writeValue(textEncoder.encode('NEXT'));
       } catch (error) {
-        console.error('Error requesting chunk:', error);
+        console.error('Error requesting next chunk:', error);
         log('Error during download: ' + error);
         hideProgress();
       }
@@ -355,9 +355,7 @@
         updateProgress(progressPercent, `Received ${kbReceived} KB (${progressPercent}%)`);
         lastProgressUpdate = now;
       }
-
-      // Request next chunk (flow control - browser pulls data)
-      // Continue requesting until we get DOWNLOAD_DONE status (device returns 0 bytes)
+      // Request-response: request next chunk after receiving this one
       requestNextChunk();
     }
 

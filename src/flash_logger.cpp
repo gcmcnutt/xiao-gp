@@ -75,7 +75,7 @@ static bool flashError = false;
 static FlashLoggerState currentState = FLASH_IDLE;
 uint32_t writeCallCount = 0;    // Non-static for debug access
 static bool loggingSuspended = false;
-static alignas(4) uint8_t downloadScratch[FLASH_LOGGER_BUFFER_SIZE];
+alignas(4) static uint8_t downloadScratch[FLASH_LOGGER_BUFFER_SIZE];
 
 // Download state
 static uint32_t downloadStartAddr = 0;

@@ -2,7 +2,11 @@
 #include <GP/autoc/aircraft_state.h>
 #include <embedded_pathgen_selector.h>
 #include <GP/autoc/gp_evaluator_embedded.h>
+#ifdef USE_NN_PROGRAM
+#include <nn_program.h>
+#else
 #include <gp_program.h>
+#endif
 #include <mbed.h>
 #include <vector>
 #include <cmath>
@@ -225,6 +229,7 @@ static void mspUpdateGPControl()
     gp_scalar debug_getalpha = evaluateGPOperator(GETALPHA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
     gp_scalar debug_getbeta = evaluateGPOperator(GETBETA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
     gp_scalar debug_getdhome = evaluateGPOperator(GETDHOME, pathProvider, aircraft_state, nullptr, 0, 0.0f);
+    gp_scalar debug_getdist = evaluateGPOperator(GETDIST, pathProvider, aircraft_state, nullptr, 0, 0.0f);
 
     // GP inputs relative to rabbit
     logPrint(INFO,
@@ -240,9 +245,13 @@ static void mspUpdateGPControl()
              aircraft_state.getRelVel());
 
     // Capture temporal history before GP evaluation (for GETDPHI_PREV, GETDTHETA_PREV, etc.)
-    aircraft_state.recordErrorHistory(debug_getdphi, debug_getdtheta, millis());
+    aircraft_state.recordErrorHistory(debug_getdphi, debug_getdtheta, debug_getdist, millis());
 
+#ifdef USE_NN_PROGRAM
+    generatedNNProgram(pathProvider, aircraft_state, 0.0f);
+#else
     generatedGPProgram(pathProvider, aircraft_state, 0.0f);
+#endif
 
     // Convert GP-controlled aircraft commands to MSP RC values and cache them
     int roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
@@ -431,7 +440,12 @@ void mspUpdateState()
       analogWrite(GREEN_PIN, 0);
       logPrint(INFO, "GP Control: Switch enabled - origin NED=[%.2f, %.2f, %.2f] - program=%s",
                test_origin_offset.x(), test_origin_offset.y(), test_origin_offset.z(),
-               generatedGPProgramSource);
+#ifdef USE_NN_PROGRAM
+               generatedNNProgramSource
+#else
+               generatedGPProgramSource
+#endif
+               );
     }
     else
     {

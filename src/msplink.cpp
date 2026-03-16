@@ -1,12 +1,8 @@
 #include <main.h>
-#include <GP/autoc/aircraft_state.h>
+#include <autoc/eval/aircraft_state.h>
 #include <embedded_pathgen_selector.h>
-#include <GP/autoc/gp_evaluator_embedded.h>
-#ifdef USE_NN_PROGRAM
+#include <autoc/eval/sensor_math.h>
 #include <nn_program.h>
-#else
-#include <gp_program.h>
-#endif
 #include <mbed.h>
 #include <vector>
 #include <cmath>
@@ -222,18 +218,21 @@ static void mspUpdateGPControl()
     SinglePathProvider pathProvider(gp_path_segment, aircraft_state.getThisPathIndex());
     uint32_t eval_start_us = micros();
     
-    // Calculate craft-to-target vector in world frame
+    // Calculate debug sensor values using sensor_math functions directly
     gp_vec3 craftToTarget = gp_path_segment.start - aircraft_state.getPosition();
-    gp_scalar debug_getdtheta = evaluateGPOperator(GETDTHETA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
-    gp_scalar debug_getdphi = evaluateGPOperator(GETDPHI, pathProvider, aircraft_state, nullptr, 0, 0.0f);
-    gp_scalar debug_getalpha = evaluateGPOperator(GETALPHA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
-    gp_scalar debug_getbeta = evaluateGPOperator(GETBETA, pathProvider, aircraft_state, nullptr, 0, 0.0f);
-    gp_scalar debug_getdhome = evaluateGPOperator(GETDHOME, pathProvider, aircraft_state, nullptr, 0, 0.0f);
-    gp_scalar debug_getdist = evaluateGPOperator(GETDIST, pathProvider, aircraft_state, nullptr, 0, 0.0f);
+    gp_scalar debug_getdtheta = executeGetDTheta(pathProvider, aircraft_state, 0.0f);
+    gp_scalar debug_getdphi = executeGetDPhi(pathProvider, aircraft_state, 0.0f);
+    gp_vec3 vel_body = aircraft_state.getOrientation().inverse() * aircraft_state.getVelocity();
+    gp_scalar debug_getalpha = std::atan2(-vel_body.z(), vel_body.x());
+    gp_scalar debug_getbeta = std::atan2(vel_body.y(), vel_body.x());
+    gp_scalar debug_getdhome = (gp_vec3(0, 0, -100.0f) - aircraft_state.getPosition()).norm();
+    gp_vec3 targetPos = getInterpolatedTargetPosition(
+        pathProvider, static_cast<int32_t>(aircraft_state.getSimTimeMsec()), 0.0f);
+    gp_scalar debug_getdist = (targetPos - aircraft_state.getPosition()).norm();
 
-    // GP inputs relative to rabbit
+    // NN inputs relative to rabbit
     logPrint(INFO,
-             "GP Input: idx=%d rabbit=[%.1f,%.1f,%.1f] vec=[%.1f,%.1f,%.1f] alpha[0]=%.3f beta[0]=%.3f dtheta[0]=%.3f dphi[0]=%.3f dhome[0]=%.3f relvel=%.2f",
+             "NN Input: idx=%d rabbit=[%.1f,%.1f,%.1f] vec=[%.1f,%.1f,%.1f] alpha=%.3f beta=%.3f dtheta=%.3f dphi=%.3f dhome=%.3f relvel=%.2f",
              current_path_index,
              gp_path_segment.start.x(), gp_path_segment.start.y(), gp_path_segment.start.z(),
              craftToTarget.x(), craftToTarget.y(), craftToTarget.z(),
@@ -247,19 +246,15 @@ static void mspUpdateGPControl()
     // Capture temporal history before GP evaluation (for GETDPHI_PREV, GETDTHETA_PREV, etc.)
     aircraft_state.recordErrorHistory(debug_getdphi, debug_getdtheta, debug_getdist, millis());
 
-#ifdef USE_NN_PROGRAM
     generatedNNProgram(pathProvider, aircraft_state, 0.0f);
-#else
-    generatedGPProgram(pathProvider, aircraft_state, 0.0f);
-#endif
 
-    // Convert GP-controlled aircraft commands to MSP RC values and cache them
+    // Convert NN-controlled aircraft commands to MSP RC values and cache them
     int roll_cmd = convertRollToMSPChannel(aircraft_state.getRollCommand());
     int pitch_cmd = convertPitchToMSPChannel(aircraft_state.getPitchCommand());
     int throttle_cmd = convertThrottleToMSPChannel(aircraft_state.getThrottleCommand());
     updateCachedCommands(roll_cmd, pitch_cmd, throttle_cmd, eval_start_us);
 
-    logPrint(INFO, "GP Output: rc=[%d,%d,%d]", roll_cmd, pitch_cmd, throttle_cmd);
+    logPrint(INFO, "NN Output: rc=[%d,%d,%d]", roll_cmd, pitch_cmd, throttle_cmd);
   }
 }
 
@@ -438,14 +433,9 @@ void mspUpdateState()
       state.autoc_enabled = true;
       servo_reset_required = false;
       analogWrite(GREEN_PIN, 0);
-      logPrint(INFO, "GP Control: Switch enabled - origin NED=[%.2f, %.2f, %.2f] - program=%s",
+      logPrint(INFO, "NN Control: Switch enabled - origin NED=[%.2f, %.2f, %.2f] - program=%s",
                test_origin_offset.x(), test_origin_offset.y(), test_origin_offset.z(),
-#ifdef USE_NN_PROGRAM
-               generatedNNProgramSource
-#else
-               generatedGPProgramSource
-#endif
-               );
+               generatedNNProgramSource);
     }
     else
     {

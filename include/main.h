@@ -6,7 +6,7 @@
 #include "MSP.h"
 #include "state.h"
 #include "flash_logger.h"
-#include <GP/autoc/gp_types.h>
+#include <autoc/types.h>
 
 // Forward declarations
 struct AircraftState;

@@ -5,7 +5,7 @@
 // Implements 6 AeroStandard paths from GP/autoc/pathgen.h
 // Uses desktop-compatible std::mt19937 for SeededRandomB reproducibility
 
-#include <GP/autoc/aircraft_state.h>
+#include <autoc/eval/aircraft_state.h>
 #include <vector>
 #include <math.h>
 #include <random>  // For std::mt19937 (path 5 only)
